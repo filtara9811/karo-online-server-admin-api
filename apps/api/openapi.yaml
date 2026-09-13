@@ -1,0 +1,566 @@
+openapi: 3.0.3
+info:
+  title: Karo Online API
+  version: 1.0.0
+  description: Production Express API ported from TanStack server functions.
+servers:
+  - url: http://localhost:4000
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Envelope:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        data: {}
+        error: { type: string }
+paths:
+  /health:
+    get:
+      security: []
+      summary: Liveness
+      responses:
+        "200": { description: OK }
+  /v1/auth/otp/check-test:
+    post:
+      security: []
+      summary: Check if phone is an enabled test account
+      responses:
+        "200": { description: OK }
+  /v1/auth/otp/send:
+    post:
+      security: []
+      summary: Send OTP via SMS or WhatsApp
+      responses:
+        "200": { description: OK }
+  /v1/auth/otp/verify:
+    post:
+      security: []
+      summary: Verify OTP and return Supabase session tokens
+      responses:
+        "200": { description: OK }
+  /v1/auth/register:
+    post:
+      security: []
+      summary: Finalize customer registration after OTP
+      responses:
+        "200": { description: OK }
+  /v1/auth/activation-fee:
+    get:
+      security: []
+      summary: Dynamic activation fee
+      responses:
+        "200": { description: OK }
+  /v1/auth/device/register:
+    post:
+      security: []
+      summary: Bind hardware fingerprint to a phone
+      responses:
+        "200": { description: OK }
+  /v1/auth/device/unlock:
+    post:
+      summary: Admin unlock of a device fingerprint
+      responses:
+        "200": { description: OK }
+  /v1/me:
+    get:
+      summary: Current customer profile
+      responses:
+        "200": { description: OK }
+  /v1/quick/map-vendors:
+    get:
+      security: []
+      summary: Nearby vendors mapped to catalog items
+      responses:
+        "200": { description: OK }
+    post:
+      security: []
+      summary: Nearby vendors mapped to catalog items
+      responses:
+        "200": { description: OK }
+  /v1/quick/nearby:
+    get:
+      security: []
+      summary: Nearby online/offline vendors
+      responses:
+        "200": { description: OK }
+    post:
+      security: []
+      summary: Nearby online/offline vendors
+      responses:
+        "200": { description: OK }
+  /v1/quick/catalog:
+    get:
+      security: []
+      summary: Categories, catalog items, catalog types
+      responses:
+        "200": { description: OK }
+  /v1/leads/mine:
+    get:
+      summary: Leads for the signed-in customer and vendor
+      responses:
+        "200": { description: OK }
+  /v1/leads/{id}:
+    get:
+      summary: Lead detail
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/leads/{id}/accept:
+    post:
+      summary: Accept a lead (vendor RPC)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/leads/{id}/reject:
+    post:
+      summary: Reject a lead (vendor RPC)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/leads/{id}/messages:
+    get:
+      summary: Lead chat messages
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Send a lead chat message
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/me:
+    get:
+      summary: Admin identity and roles
+      responses:
+        "200": { description: OK }
+  /v1/admin/stats:
+    get:
+      summary: Admin dashboard stats
+      responses:
+        "200": { description: OK }
+  /v1/admin/customers:
+    get:
+      summary: List customers
+      responses:
+        "200": { description: OK }
+  /v1/admin/vendors:
+    get:
+      summary: List vendors
+      responses:
+        "200": { description: OK }
+  /v1/admin/staff:
+    get:
+      summary: List staff roles and profiles
+      responses:
+        "200": { description: OK }
+  /v1/admin/leads:
+    get:
+      summary: Admin leads dashboard
+      responses:
+        "200": { description: OK }
+  /v1/admin/catalog/categories:
+    get:
+      summary: Catalog categories
+      responses:
+        "200": { description: OK }
+  /v1/admin/catalog/items:
+    get:
+      summary: Catalog items
+      responses:
+        "200": { description: OK }
+  /v1/admin/lookup:
+    post:
+      summary: Lookup customer/vendor/wallet by q
+      responses:
+        "200": { description: OK }
+  /v1/admin/users/{userId}:
+    get:
+      summary: Full user dossier
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/users/{userId}/customer:
+    patch:
+      summary: Patch customer profile
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/users/{userId}/vendor:
+    patch:
+      summary: Patch vendor profile
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/users/{userId}/wallet:
+    post:
+      summary: Credit or debit wallet
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/users/{userId}/block:
+    post:
+      summary: Block or unblock user
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/vendors/{userId}/approval:
+    post:
+      summary: Approve or unapprove vendor
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/kyc/{id}/status:
+    post:
+      summary: Set KYC status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/admin/table/{table}:
+    get:
+      summary: Generic admin list
+      parameters:
+        - in: path
+          name: table
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Generic admin create
+      parameters:
+        - in: path
+          name: table
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+    patch:
+      summary: Generic admin update
+      parameters:
+        - in: path
+          name: table
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+    delete:
+      summary: Generic admin delete
+      parameters:
+        - in: path
+          name: table
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /v1/admin/scan-insights:
+    get:
+      summary: OCR scan insights
+      responses:
+        "200": { description: OK }
+  /v1/payments/razorpay/order:
+    post:
+      summary: Create Razorpay order
+      responses:
+        "200": { description: OK }
+  /v1/payments/razorpay/verify:
+    post:
+      summary: Verify Razorpay payment
+      responses:
+        "200": { description: OK }
+  /v1/payments/cashfree/order:
+    post:
+      summary: Create Cashfree order
+      responses:
+        "200": { description: OK }
+  /v1/payments/cashfree/verify:
+    post:
+      summary: Verify Cashfree order
+      responses:
+        "200": { description: OK }
+  /v1/maps/geocode:
+    post:
+      summary: Address to lat/lng
+      responses:
+        "200": { description: OK }
+  /v1/maps/reverse:
+    post:
+      summary: Lat/lng to address
+      responses:
+        "200": { description: OK }
+  /v1/maps/distance:
+    post:
+      summary: Distance matrix
+      responses:
+        "200": { description: OK }
+  /v1/maps/places:
+    post:
+      summary: Places autocomplete
+      responses:
+        "200": { description: OK }
+  /v1/maps/place-details:
+    post:
+      summary: Place details
+      responses:
+        "200": { description: OK }
+  /v1/maps/directions:
+    post:
+      summary: Driving directions
+      responses:
+        "200": { description: OK }
+  /v1/push/test:
+    post:
+      summary: Admin test push
+      responses:
+        "200": { description: OK }
+  /v1/push/lead:
+    post:
+      summary: Lead push to vendor
+      responses:
+        "200": { description: OK }
+  /v1/push/status:
+    post:
+      summary: Vendor status push to customer
+      responses:
+        "200": { description: OK }
+  /v1/staff/me:
+    get:
+      summary: Staff profile
+      responses:
+        "200": { description: OK }
+  /v1/staff/tasks:
+    get:
+      summary: My staff tasks
+      responses:
+        "200": { description: OK }
+  /v1/staff/tasks/{id}/status:
+    post:
+      summary: Update my task status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK }
+  /v1/staff/wallet:
+    get:
+      summary: Staff wallet and ledger
+      responses:
+        "200": { description: OK }
+  /v1/staff/wallet/withdraw:
+    post:
+      summary: Request staff withdrawal
+      responses:
+        "200": { description: OK }
+  /v1/staff/signup:
+    post:
+      summary: Submit staff signup request
+      responses:
+        "200": { description: OK }
+  /v1/staff/invite/accept:
+    post:
+      summary: Accept staff invite
+      responses:
+        "200": { description: OK }
+  /v1/cms/page/{slug}:
+    get:
+      security: []
+      summary: Marketing page payload
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /v1/cms/blog:
+    get:
+      security: []
+      summary: Published blog posts
+      responses:
+        "200": { description: OK }
+  /v1/cms/blog/{slug}:
+    get:
+      security: []
+      summary: Blog post by slug
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /v1/cms/forms/{slug}/submit:
+    post:
+      security: []
+      summary: Submit a CMS form
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /v1/scans:
+    get:
+      summary: List my scan history
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Save a scan
+      responses:
+        "200": { description: OK }
+    delete:
+      summary: Delete a scan
+      responses:
+        "200": { description: OK }
+  /v1/shops/nearby:
+    get:
+      security: []
+      summary: Nearby digital shops
+      responses:
+        "200": { description: OK }
+  /v1/shops/{code}/landing:
+    get:
+      security: []
+      summary: Public shop landing payload
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /api/public/whatsapp/webhook:
+    get:
+      security: []
+      summary: Meta WhatsApp verify handshake
+      responses:
+        "200": { description: challenge }
+    post:
+      security: []
+      summary: Meta WhatsApp events
+      responses:
+        "200": { description: ok }
+  /api/public/whatsapp/send-lead:
+    post:
+      security: []
+      summary: Fan-out WhatsApp lead templates
+      responses:
+        "200": { description: OK }
+  /api/public/hooks/lead-whatsapp:
+    post:
+      security: []
+      summary: GatewayAPI lead WhatsApp hook
+      responses:
+        "200": { description: OK }
+  /api/public/push/send-lead:
+    post:
+      security: []
+      summary: Internal lead push fan-out
+      responses:
+        "200": { description: OK }
+  /api/public/shiprocket-webhook:
+    post:
+      security: []
+      summary: Shiprocket tracking webhook
+      responses:
+        "200": { description: ok }
+  /api/public/manifest/{code}:
+    get:
+      security: []
+      summary: Per-shop web app manifest
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: manifest }
+  /api/public/shop-icon/{code}:
+    get:
+      security: []
+      summary: Same-origin shop icon proxy
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: image }
+  /api/public/vcard/{code}:
+    get:
+      security: []
+      summary: vCard for a referral code
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: vcard }
+  /api/public/vendor-location:
+    get:
+      summary: Update vendor live GPS
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Update vendor live GPS
+      responses:
+        "200": { description: OK }

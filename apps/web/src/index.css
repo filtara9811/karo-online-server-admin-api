@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-display: "Cormorant Garamond", "Playfair Display", serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --color-gold: #d4af37;
+  --color-gold-shine: #fff3b0;
+  --color-gold-mid: #e8c558;
+  --color-gold-shadow: #b8860b;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: #0a0a0a;
+  color: #fff8dc;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.ko-gold-text {
+  background: linear-gradient(180deg, #fff3c8 0%, #f5d97a 45%, #d4af37 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.ko-gold-bar {
+  background: linear-gradient(180deg, #fff3c8 0%, #f5d97a 50%, #d4af37 100%);
+  color: #1a1208;
+}
+
+.ko-glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+  border: 1px solid rgba(212, 175, 55, 0.18);
+  backdrop-filter: blur(12px);
+}
+
+.ko-aurora {
+  position: relative;
+}
+
+.ko-aurora::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(800px 400px at 10% -10%, rgba(212, 175, 55, 0.18), transparent 60%),
+    radial-gradient(700px 400px at 90% 0%, rgba(26, 26, 46, 0.9), transparent 60%),
+    radial-gradient(600px 500px at 50% 100%, rgba(212, 175, 55, 0.1), transparent 70%);
+  pointer-events: none;
+}

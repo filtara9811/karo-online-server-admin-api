@@ -1,0 +1,18 @@
+{
+  "name": "karo-online-server-admin",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/admin",
+    "apps/web",
+    "packages/design-tokens"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@karo/api & npm run dev --workspace=@karo/admin & npm run dev --workspace=@karo/web",
+    "dev:api": "npm run dev --workspace=@karo/api",
+    "dev:admin": "npm run dev --workspace=@karo/admin",
+    "dev:web": "npm run dev --workspace=@karo/web",
+    "build": "npm run build --workspace=@karo/web && npm run build --workspace=@karo/admin && npm run build --workspace=@karo/api",
+    "start": "npm run start --workspace=@karo/api"
+  }
+}
