@@ -61,7 +61,7 @@ const TABLE_ORDER: Record<string, string> = {
 
 async function listTable(
   res: import("express").Response,
-  sb: import("@supabase/supabase-js").SupabaseClient,
+  sb: import("../lib/pg-client.js").DbClient,
   table: string,
   req: import("express").Request,
   searchCols: string[] = [],

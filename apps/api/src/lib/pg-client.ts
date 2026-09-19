@@ -7,7 +7,7 @@ import { env } from "../config/env.js";
 const scrypt = promisify(scryptCb);
 const { Pool } = pg;
 
-let pool: pg.Pool | null = null;
+let pool: InstanceType<typeof Pool> | null = null;
 
 export function hasDatabase() {
   return Boolean(env.databaseUrl);
@@ -26,7 +26,7 @@ export function getPool() {
       keepAlive: true,
       keepAliveInitialDelayMillis: 10_000,
     });
-    pool.on("error", (err) => {
+    pool.on("error", (err: Error) => {
       console.error("[pg] idle connection dropped:", err.message);
     });
   }
@@ -52,6 +52,7 @@ type Filter =
   | { kind: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "ilike"; col: string; value: unknown }
   | { kind: "in"; col: string; value: unknown[] }
   | { kind: "is"; col: string; value: unknown }
+  | { kind: "not"; col: string; op: string; value: unknown }
   | { kind: "or"; raw: string };
 
 function applyFilters(filters: Filter[], start = 1) {
@@ -76,6 +77,26 @@ function applyFilters(filters: Filter[], start = 1) {
         }
       }
       if (ors.length) where.push(`(${ors.join(" or ")})`);
+      continue;
+    }
+    if (f.kind === "not") {
+      if (f.op === "is" && (f.value == null || f.value === "null")) {
+        where.push(`${ident(f.col)} is not null`);
+      } else if (f.op === "in" && Array.isArray(f.value)) {
+        const vals = f.value;
+        if (!vals.length) {
+          where.push("true");
+        } else {
+          const slots = vals.map((v) => {
+            params.push(v);
+            return `$${i++}`;
+          });
+          where.push(`${ident(f.col)} not in (${slots.join(",")})`);
+        }
+      } else {
+        params.push(f.value);
+        where.push(`${ident(f.col)} ${f.op === "eq" ? "<>" : `not ${op(f.op)}`} $${i++}`);
+      }
       continue;
     }
     if (f.kind === "is") {
@@ -183,10 +204,96 @@ type QueryState = {
   rangeTo?: number;
   payload?: unknown;
   onConflict?: string;
+  ignoreDuplicates?: boolean;
   single?: "maybe" | "one";
 };
 
-function makeQuery(table: string) {
+export type QueryError = { message: string };
+
+export type QueryResult<T = any> = {
+  data: T;
+  error: QueryError | null;
+  count?: number;
+};
+
+export type AuthUser = {
+  id: string;
+  email?: string | null;
+  phone?: string | null;
+  role?: string;
+  user_metadata?: any;
+  app_metadata?: any;
+  aud?: string;
+  created_at?: string;
+};
+
+export type AuthSession = {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  expires_at?: number;
+  token_type: string;
+  user: AuthUser;
+};
+
+export type QueryBuilder = {
+  select(cols?: string, opts?: { count?: string; head?: boolean }): QueryBuilder;
+  eq(col: string, value: unknown): QueryBuilder;
+  neq(col: string, value: unknown): QueryBuilder;
+  gt(col: string, value: unknown): QueryBuilder;
+  gte(col: string, value: unknown): QueryBuilder;
+  lt(col: string, value: unknown): QueryBuilder;
+  lte(col: string, value: unknown): QueryBuilder;
+  ilike(col: string, value: unknown): QueryBuilder;
+  in(col: string, value: unknown[]): QueryBuilder;
+  is(col: string, value: unknown): QueryBuilder;
+  not(col: string, op: string, value?: unknown): QueryBuilder;
+  or(raw: string): QueryBuilder;
+  order(col: string, opts?: { ascending?: boolean }): QueryBuilder;
+  limit(n: number): QueryBuilder;
+  range(from: number, to: number): QueryBuilder;
+  maybeSingle(): QueryBuilder;
+  single(): QueryBuilder;
+  insert(payload: unknown): QueryBuilder;
+  update(payload: unknown): QueryBuilder;
+  upsert(payload: unknown, opts?: { onConflict?: string; ignoreDuplicates?: boolean }): QueryBuilder;
+  delete(): QueryBuilder;
+  then<TResult1 = QueryResult, TResult2 = never>(
+    onfulfilled?: ((value: QueryResult) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2>;
+};
+
+export type DbClient = {
+  from(table: string): QueryBuilder;
+  rpc(name: string, args?: Record<string, unknown>): Promise<QueryResult>;
+  auth: {
+    getUser(token?: string): Promise<{ data: { user: AuthUser | null }; error: QueryError | null }>;
+    signInWithPassword(creds: { email: string; password: string }): Promise<{
+      data: { session: AuthSession | null; user: AuthUser | null };
+      error: QueryError | null;
+    }>;
+    admin: {
+      listUsers(opts?: { page?: number; perPage?: number }): Promise<{
+        data: { users: AuthUser[] };
+        error: QueryError | null;
+      }>;
+      createUser(input: {
+        id?: string;
+        email: string;
+        password: string;
+        email_confirm?: boolean;
+        user_metadata?: Record<string, unknown>;
+      }): Promise<{ data: { user: AuthUser | null }; error: QueryError | null }>;
+      updateUserById(
+        id: string,
+        input: { email?: string; password?: string; user_metadata?: Record<string, unknown> },
+      ): Promise<{ data: { user: AuthUser | null }; error: QueryError | null }>;
+    };
+  };
+};
+
+function makeQuery(table: string): QueryBuilder {
   const state: QueryState = {
     table,
     op: "select",
@@ -196,7 +303,7 @@ function makeQuery(table: string) {
     orders: [],
   };
 
-  const self: Record<string, unknown> = {};
+  const self = {} as QueryBuilder;
   const chain = () => self;
 
   self.select = (cols = "*", opts?: { count?: string }) => {
@@ -242,6 +349,10 @@ function makeQuery(table: string) {
     state.filters.push({ kind: "is", col, value });
     return chain();
   };
+  self.not = (col: string, op: string, value?: unknown) => {
+    state.filters.push({ kind: "not", col, op, value });
+    return chain();
+  };
   self.or = (raw: string) => {
     state.filters.push({ kind: "or", raw });
     return chain();
@@ -279,10 +390,11 @@ function makeQuery(table: string) {
     state.payload = payload;
     return chain();
   };
-  self.upsert = (payload: unknown, opts?: { onConflict?: string }) => {
+  self.upsert = (payload: unknown, opts?: { onConflict?: string; ignoreDuplicates?: boolean }) => {
     state.op = "upsert";
     state.payload = payload;
     state.onConflict = opts?.onConflict;
+    state.ignoreDuplicates = opts?.ignoreDuplicates;
     return chain();
   };
   self.delete = () => {
@@ -291,7 +403,7 @@ function makeQuery(table: string) {
   };
 
   const run = async () => execute(state);
-  self.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => run().then(resolve, reject);
+  self.then = (resolve, reject) => run().then(resolve, reject);
   return self;
 }
 
@@ -315,10 +427,14 @@ async function execute(state: QueryState) {
       let sql = `insert into ${table} (${keys.map(ident).join(",")}) values ${values.join(",")}`;
       if (state.op === "upsert" && state.onConflict) {
         const conflict = state.onConflict.split(",").map((c) => ident(c.trim())).join(",");
-        const sets = keys
-          .filter((k) => k !== state.onConflict)
-          .map((k) => `${ident(k)} = excluded.${ident(k)}`);
-        sql += ` on conflict (${conflict}) do update set ${sets.join(",")}`;
+        if (state.ignoreDuplicates) {
+          sql += ` on conflict (${conflict}) do nothing`;
+        } else {
+          const sets = keys
+            .filter((k) => k !== state.onConflict)
+            .map((k) => `${ident(k)} = excluded.${ident(k)}`);
+          sql += ` on conflict (${conflict}) do update set ${sets.join(",")}`;
+        }
       }
       sql += " returning *";
       const res = await db.query(sql, params);
@@ -372,10 +488,10 @@ async function execute(state: QueryState) {
   }
 }
 
-export function createPgClient() {
+export function createPgClient(): DbClient {
   return {
     from: (table: string) => makeQuery(table),
-    rpc: async (name: string) => {
+    rpc: async (name: string, _args?: Record<string, unknown>) => {
       try {
         const res = await getPool().query(`select public.${ident(name)}() as data`);
         return { data: res.rows[0]?.data ?? null, error: null };

@@ -26,7 +26,7 @@ export async function seedBootstrapAdmin() {
       console.warn("[seed-admin]", created.error.message);
       return;
     }
-    user = created.data.user;
+    user = created.data.user ?? undefined;
   }
   if (!user) return;
   const { error } = await admin.from("user_roles").upsert(
@@ -69,7 +69,9 @@ export async function seedSmsGateways() {
     console.warn("[seed-sms]", error.message);
     return;
   }
-  const have = new Map((data ?? []).map((r: { id: string; provider: string; display_name?: string }) => [String(r.provider), r]));
+  const have = new Map<string, { id: string; provider: string; display_name?: string }>(
+    (data ?? []).map((r: { id: string; provider: string; display_name?: string }) => [String(r.provider), r]),
+  );
   for (const seed of SMS_SEEDS) {
     const existing = have.get(seed.provider);
     if (!existing) {

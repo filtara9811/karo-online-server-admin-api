@@ -1,6 +1,6 @@
 import { SignJWT, importPKCS8 } from "jose";
 import { z } from "zod";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "./pg-client.js";
 import { getServiceRoleClient } from "./supabase.js";
 
 export const TestPushSchema = z.object({
@@ -264,7 +264,7 @@ export async function sendLeadPushToVendorInternal(data: { vendor_id: string; le
 
 export async function sendTestPush(
   callerId: string,
-  userSb: SupabaseClient,
+  userSb: DbClient,
   data: z.infer<typeof TestPushSchema>,
 ) {
   const admin = getServiceRoleClient();
@@ -341,7 +341,7 @@ export async function sendTestPush(
 
 export async function sendLeadPushToVendor(
   callerId: string,
-  userSb: SupabaseClient,
+  userSb: DbClient,
   data: z.infer<typeof LeadPushSchema>,
 ) {
   const admin = getServiceRoleClient();

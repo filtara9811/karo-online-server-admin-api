@@ -1,17 +1,16 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { hasDatabase } from "../config/env.js";
-import { createPgClient } from "./pg-client.js";
+import { createPgClient, type DbClient } from "./pg-client.js";
 
-type AnyClient = SupabaseClient | ReturnType<typeof createPgClient>;
+export type { AuthUser, DbClient, QueryBuilder, QueryResult } from "./pg-client.js";
 
-let pgClient: ReturnType<typeof createPgClient> | null = null;
+let pgClient: DbClient | null = null;
 
 function pg() {
   if (!pgClient) pgClient = createPgClient();
   return pgClient;
 }
 
-export function getServiceRoleClient(): AnyClient {
+export function getServiceRoleClient(): DbClient {
   if (!hasDatabase()) {
     throw new Error("DATABASE_URL missing — DigitalOcean Postgres is required");
   }
@@ -19,15 +18,15 @@ export function getServiceRoleClient(): AnyClient {
 }
 
 /** Privileged client when DigitalOcean Postgres is available. */
-export function tryServiceRole(): AnyClient | null {
+export function tryServiceRole(): DbClient | null {
   if (hasDatabase()) return getServiceRoleClient();
   return null;
 }
 
-export function createUserClient(_accessToken: string): AnyClient {
+export function createUserClient(_accessToken: string): DbClient {
   return getServiceRoleClient();
 }
 
-export function createAnonClient(): AnyClient {
+export function createAnonClient(): DbClient {
   return getServiceRoleClient();
 }

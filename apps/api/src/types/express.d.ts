@@ -1,12 +1,12 @@
-import type { SupabaseClient, User } from "@supabase/supabase-js";
+import type { AuthUser, DbClient } from "../lib/pg-client.js";
 
 declare global {
   namespace Express {
     interface Request {
       userId?: string;
       accessToken?: string;
-      userClient?: SupabaseClient;
-      authUser?: User;
+      userClient?: DbClient;
+      authUser?: AuthUser;
       roles?: string[];
       rawBody?: string;
     }

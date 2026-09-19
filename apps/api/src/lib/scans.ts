@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "./pg-client.js";
 
 export const SaveScanSchema = z.object({
   kinds: z.array(z.string()).min(1).max(10),
@@ -10,7 +10,7 @@ export const SaveScanSchema = z.object({
   status: z.enum(["complete", "pending_ocr"]).optional(),
 });
 
-export async function listScanHistory(sb: SupabaseClient) {
+export async function listScanHistory(sb: DbClient) {
   const { data, error } = await sb
     .from("vendor_scan_history")
     .select("id, kinds, thumbnail, extracted, confidence, field_confidence, status, created_at")
@@ -24,7 +24,7 @@ export async function listScanHistory(sb: SupabaseClient) {
 }
 
 export async function saveScanHistory(
-  sb: SupabaseClient,
+  sb: DbClient,
   userId: string,
   data: z.infer<typeof SaveScanSchema>,
 ) {
@@ -48,13 +48,13 @@ export async function saveScanHistory(
   return { id: row.id as string };
 }
 
-export async function deleteScanHistory(sb: SupabaseClient, id: string) {
+export async function deleteScanHistory(sb: DbClient, id: string) {
   const { error } = await sb.from("vendor_scan_history").delete().eq("id", id);
   if (error) throw new Error(error.message);
   return { ok: true };
 }
 
-export async function getScanInsights(sb: SupabaseClient, userId: string) {
+export async function getScanInsights(sb: DbClient, userId: string) {
   try {
     const { data: isAdmin } = await sb.rpc("has_role", { _user_id: userId, _role: "admin" });
     if (isAdmin === false) throw new Error("Forbidden");

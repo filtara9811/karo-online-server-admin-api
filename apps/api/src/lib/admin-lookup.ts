@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DbClient } from "./pg-client.js";
 import { tryServiceRole } from "./supabase.js";
 
 const onlyDigits = (s: string) => s.replace(/\D/g, "");
@@ -52,7 +52,7 @@ export const KycStatusSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
-export async function lookupUser(sb: SupabaseClient, qRaw: string) {
+export async function lookupUser(sb: DbClient, qRaw: string) {
   const q = qRaw.trim();
   const digits = onlyDigits(q);
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(q);
@@ -96,7 +96,7 @@ export async function lookupUser(sb: SupabaseClient, qRaw: string) {
   };
 }
 
-export async function getUserFull(sb: SupabaseClient, uid: string) {
+export async function getUserFull(sb: DbClient, uid: string) {
   const privileged = tryServiceRole() ?? sb;
   const [c, v, w, tx, leads, refs] = await Promise.all([
     sb.from("customers").select("*").eq("user_id", uid).maybeSingle(),
@@ -122,7 +122,7 @@ export async function getUserFull(sb: SupabaseClient, uid: string) {
 }
 
 export async function updateCustomerProfile(
-  sb: SupabaseClient,
+  sb: DbClient,
   userId: string,
   patch: z.infer<typeof customerPatchSchema>,
 ) {
@@ -135,7 +135,7 @@ export async function updateCustomerProfile(
 }
 
 export async function updateVendorProfile(
-  sb: SupabaseClient,
+  sb: DbClient,
   userId: string,
   patch: z.infer<typeof vendorPatchSchema>,
 ) {
@@ -147,7 +147,7 @@ export async function updateVendorProfile(
   return { ok: true };
 }
 
-export async function adjustWallet(sb: SupabaseClient, userId: string, data: z.infer<typeof WalletSchema>) {
+export async function adjustWallet(sb: DbClient, userId: string, data: z.infer<typeof WalletSchema>) {
   const { data: res, error } = await sb.rpc("admin_adjust_wallet", {
     _user_id: userId,
     _kind: data.kind,
@@ -159,13 +159,13 @@ export async function adjustWallet(sb: SupabaseClient, userId: string, data: z.i
   return res;
 }
 
-export async function setUserBlock(sb: SupabaseClient, userId: string, blocked: boolean) {
+export async function setUserBlock(sb: DbClient, userId: string, blocked: boolean) {
   await sb.from("customers").update({ is_blocked: blocked, updated_at: new Date().toISOString() }).eq("user_id", userId);
   await sb.from("vendors").update({ is_blocked: blocked, updated_at: new Date().toISOString() }).eq("user_id", userId);
   return { ok: true };
 }
 
-export async function setVendorApproval(sb: SupabaseClient, userId: string, approved: boolean) {
+export async function setVendorApproval(sb: DbClient, userId: string, approved: boolean) {
   const { error } = await sb
     .from("vendors")
     .update({
@@ -179,7 +179,7 @@ export async function setVendorApproval(sb: SupabaseClient, userId: string, appr
 }
 
 export async function setKycStatus(
-  sb: SupabaseClient,
+  sb: DbClient,
   kycId: string,
   status: "approved" | "rejected" | "pending",
   notes?: string,
@@ -193,7 +193,7 @@ export async function setKycStatus(
   return { ok: true };
 }
 
-export async function getAdminStats(sb: SupabaseClient) {
+export async function getAdminStats(sb: DbClient) {
   const [statsRes, catRes, gwRes, lgRes, cpRes, leadRes] = await Promise.all([
     sb.rpc("get_admin_stats"),
     sb.from("categories").select("id", { count: "exact", head: true }),

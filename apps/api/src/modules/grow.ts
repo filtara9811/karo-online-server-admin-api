@@ -643,7 +643,7 @@ growRouter.get(
         visits = (data ?? []) as typeof visits;
       }
     }
-    const out = [];
+    const out: { day: string; visitors: number; unique: number; customers: number }[] = [];
     const base = new Date();
     base.setHours(0, 0, 0, 0);
     for (let i = days - 1; i >= 0; i--) {

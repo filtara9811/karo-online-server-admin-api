@@ -135,7 +135,8 @@ authRouter.post(
     const parsed = SendOtpSchema.safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const result = await sendOtp(parsed.data);
-    return result.ok ? ok(res, result) : fail(res, 400, result.error ?? "OTP send failed", result);
+    const sendError = "error" in result ? String(result.error ?? "OTP send failed") : "OTP send failed";
+    return result.ok ? ok(res, result) : fail(res, 400, sendError, result);
   }),
 );
 
