@@ -1,6 +1,6 @@
-import express, { type NextFunction, type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import cors from "cors";
-import helmet from "helmet";
+import helmetModule from "helmet";
 import morgan from "morgan";
 import { env, hasDatabase, hasServiceRole } from "./config/env.js";
 import { fail, ok } from "./lib/respond.js";
@@ -23,6 +23,14 @@ import { mountStaticSites } from "./lib/static-site.js";
 export function createApp() {
   const app = express();
   app.disable("x-powered-by");
+  const helmet = (
+    typeof helmetModule === "function" ? helmetModule : (helmetModule as { default: unknown }).default
+  ) as (options?: {
+    contentSecurityPolicy?: false;
+    crossOriginEmbedderPolicy?: false;
+    crossOriginResourcePolicy?: { policy: "cross-origin" };
+    frameguard?: false;
+  }) => RequestHandler;
   app.use(
     helmet({
       contentSecurityPolicy: false,
