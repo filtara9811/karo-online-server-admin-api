@@ -276,6 +276,15 @@ export const ADMIN_CRUD_TABLES = [
   "device_fingerprints",
   "kyc_verifications",
   "web_virtual_devices",
+  "user_roles",
+  "staff_profiles",
+  "digital_shops",
+  "shop_products",
+  "shop_orders",
+  "shop_visits",
+  "qr_campaigns",
+  "vendor_programs",
+  "vendor_program_joins",
 ] as const;
 
 export type AdminCrudTable = (typeof ADMIN_CRUD_TABLES)[number];

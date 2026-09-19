@@ -1,51 +1,33 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { env, hasServiceRole, SERVICE_ROLE_MISSING } from "../config/env.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { hasDatabase } from "../config/env.js";
+import { createPgClient } from "./pg-client.js";
 
-const AUTH_OPTS = {
-  persistSession: false,
-  autoRefreshToken: false,
-  storage: undefined,
-} as const;
+type AnyClient = SupabaseClient | ReturnType<typeof createPgClient>;
 
-let adminClient: SupabaseClient | null = null;
+let pgClient: ReturnType<typeof createPgClient> | null = null;
 
-export function getServiceRoleClient(): SupabaseClient {
-  if (!hasServiceRole()) {
-    throw new Error(SERVICE_ROLE_MISSING);
+function pg() {
+  if (!pgClient) pgClient = createPgClient();
+  return pgClient;
+}
+
+export function getServiceRoleClient(): AnyClient {
+  if (!hasDatabase()) {
+    throw new Error("DATABASE_URL missing — DigitalOcean Postgres is required");
   }
-  if (!adminClient) {
-    adminClient = createClient(env.supabaseUrl, env.supabaseServiceRoleKey, {
-      auth: AUTH_OPTS,
-    });
-  }
-  return adminClient;
+  return pg();
 }
 
-/** Privileged client when the service role key exists; otherwise null. */
-export function tryServiceRole(): SupabaseClient | null {
-  return hasServiceRole() ? getServiceRoleClient() : null;
+/** Privileged client when DigitalOcean Postgres is available. */
+export function tryServiceRole(): AnyClient | null {
+  if (hasDatabase()) return getServiceRoleClient();
+  return null;
 }
 
-export function createUserClient(accessToken: string): SupabaseClient {
-  return createClient(env.supabaseUrl, env.supabasePublishableKey, {
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
-    auth: AUTH_OPTS,
-  });
+export function createUserClient(_accessToken: string): AnyClient {
+  return getServiceRoleClient();
 }
 
-export function createAnonClient(): SupabaseClient {
-  const key = env.supabasePublishableKey;
-  return createClient(env.supabaseUrl, key, {
-    auth: AUTH_OPTS,
-    global: {
-      fetch: (input, init) => {
-        const headers = new Headers(init?.headers);
-        if (key.startsWith("sb_") && headers.get("Authorization") === `Bearer ${key}`) {
-          headers.delete("Authorization");
-        }
-        headers.set("apikey", key);
-        return fetch(input, { ...init, headers });
-      },
-    },
-  });
+export function createAnonClient(): AnyClient {
+  return getServiceRoleClient();
 }

@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import { env, hasServiceRole } from "./config/env.js";
+import { env, hasDatabase, hasServiceRole } from "./config/env.js";
 import { fail, ok } from "./lib/respond.js";
 import { authRouter } from "./modules/auth.js";
 import { meRouter } from "./modules/me.js";
@@ -16,6 +16,7 @@ import { staffRouter } from "./modules/staff.js";
 import { cmsRouter } from "./modules/cms.js";
 import { adminScanRouter, scansRouter } from "./modules/scans.js";
 import { shopsRouter } from "./modules/shops.js";
+import { growRouter } from "./modules/grow.js";
 import { webhooksRouter } from "./modules/webhooks.js";
 import { mountStaticSites } from "./lib/static-site.js";
 
@@ -48,10 +49,10 @@ export function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   app.get("/health", (_req, res) => {
-    ok(res, { status: "up", service_role: hasServiceRole() });
+    ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
   });
   app.get("/v1/health", (_req, res) => {
-    ok(res, { status: "up", service_role: hasServiceRole() });
+    ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
   });
 
   app.use("/v1/auth", authRouter);
@@ -67,6 +68,7 @@ export function createApp() {
   app.use("/v1/cms", cmsRouter);
   app.use("/v1/scans", scansRouter);
   app.use("/v1/shops", shopsRouter);
+  app.use("/v1/grow", growRouter);
   app.use("/api/public", webhooksRouter);
 
   mountStaticSites(app);

@@ -25,6 +25,7 @@ export default function ShopLandingPage() {
   const [phone, setPhone] = useState("");
   const [chat, setChat] = useState("");
   const [sent, setSent] = useState(false);
+  const [ordered, setOrdered] = useState<string | null>(null);
 
   useEffect(() => {
     const ref = params.get("ref");
@@ -119,7 +120,27 @@ export default function ShopLandingPage() {
                 <div className="font-semibold">{p.name}</div>
                 <div className="text-xs text-white/45">{p.category}</div>
               </div>
-              <div className="text-[#f5d97a] font-bold">₹{p.price}</div>
+              <div className="flex flex-col items-end gap-1">
+                <div className="text-[#f5d97a] font-bold">₹{p.price}</div>
+                <button
+                  className="text-[11px] font-semibold text-[#f5d97a]"
+                  onClick={() => {
+                    api(`/v1/shops/${encodeURIComponent(code)}/orders`, {
+                      method: "POST",
+                      body: JSON.stringify({
+                        project: params.get("p"),
+                        visitor_name: name || undefined,
+                        visitor_phone: phone || undefined,
+                        items: [{ id: p.id, name: p.name, price: p.price, qty: 1 }],
+                      }),
+                    })
+                      .then(() => setOrdered(p.id))
+                      .catch(() => setOrdered(p.id));
+                  }}
+                >
+                  {ordered === p.id ? "Noted" : "Order"}
+                </button>
+              </div>
             </div>
           ))}
           {products.length === 0 && <p className="text-white/45 text-sm">Products will appear when the merchant adds them.</p>}

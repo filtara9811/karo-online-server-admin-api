@@ -5,6 +5,7 @@ import { tryServiceRole } from "../lib/supabase.js";
 import { parseListQuery } from "../lib/geo.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
+import { seedSmsGateways } from "../lib/seed-admin.js";
 import {
   ADMIN_CRUD_TABLES,
   ApprovalSchema,
@@ -32,7 +33,12 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.get(
   "/me",
   asyncHandler(async (req, res) => {
-    return ok(res, { roles: req.roles ?? [], userId: req.userId, user: req.authUser });
+    return ok(res, {
+      roles: req.roles ?? [],
+      userId: req.userId,
+      email: req.authUser?.email ?? null,
+      user: req.authUser,
+    });
   }),
 );
 
@@ -90,7 +96,8 @@ async function listTable(
     }
     return fail(res, 400, error.message);
   }
-  return ok(res, { rows: data ?? [], count: count ?? 0, limit, offset });
+  const rows = Array.isArray(data) ? data : data ? [data] : [];
+  return ok(res, { rows, count: count ?? rows.length, limit, offset });
 }
 
 adminRouter.get(
@@ -288,6 +295,7 @@ adminRouter.get(
   asyncHandler(async (req, res) => {
     const table = String(req.params.table);
     if (!isAllowedTable(table)) return fail(res, 400, `Table not allowed. Allowed: ${ADMIN_CRUD_TABLES.join(", ")}`);
+    if (table === "sms_gateways") await seedSmsGateways();
     return listTable(res, tryServiceRole() ?? req.userClient!, table, req);
   }),
 );

@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Shield, Mail, Lock, Loader2, ArrowLeft, Crown } from "lucide-react";
-import { supabase } from "@/lib/supabase";
 import { apiBase, apiFetch, extractRoles, isAdminRoles, type AdminMe } from "@/lib/api";
+import { clearLocalSession, getLocalSession, saveLocalSession, clearSupabaseAuthStorage } from "@/lib/local-session";
+import { ThemeToggle } from "@/theme";
+
+type Mode = "signin" | "signup" | "forgot";
 
 async function signInViaApi(email: string, password: string): Promise<string> {
   const res = await fetch(`${apiBase()}/v1/auth/admin-login`, {
@@ -15,7 +18,7 @@ async function signInViaApi(email: string, password: string): Promise<string> {
     error?: string;
     data?: {
       session?: { access_token?: string; refresh_token?: string };
-      user?: { id?: string };
+      user?: { id?: string; email?: string };
     };
   };
   if (!res.ok || body.ok === false) {
@@ -24,27 +27,40 @@ async function signInViaApi(email: string, password: string): Promise<string> {
   const access = body.data?.session?.access_token;
   const refresh = body.data?.session?.refresh_token;
   if (!access || !refresh) throw new Error("Login session missing.");
-  const { error } = await supabase.auth.setSession({ access_token: access, refresh_token: refresh });
-  if (error) throw error;
-  return body.data?.user?.id || "";
+  clearSupabaseAuthStorage();
+  saveLocalSession({
+    access_token: access,
+    refresh_token: refresh,
+    email: body.data?.user?.email ?? email,
+  });
+  return body.data?.user?.id || "local";
 }
-import { ThemeToggle } from "@/theme";
 
-type Mode = "signin" | "signup" | "forgot";
+async function signUpViaApi(email: string, password: string) {
+  const res = await fetch(`${apiBase()}/v1/auth/admin-signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok || body.ok === false) {
+    throw new Error(body.error || `Signup failed (${res.status})`);
+  }
+}
 
 async function resolveRoleRedirect(): Promise<string> {
   try {
     const me = await apiFetch<AdminMe>("/v1/admin/me");
     const roles = extractRoles(me);
     if (isAdminRoles(roles)) return "/";
-    await supabase.auth.signOut();
+    clearLocalSession();
     return "__no_role__";
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
     if (/connect nahi|Failed to fetch|NetworkError|API se/i.test(msg)) {
       return "__api_down__";
     }
-    await supabase.auth.signOut();
+    clearLocalSession();
     return "__no_role__";
   }
 }
@@ -61,8 +77,7 @@ export default function LoginPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      const uid = data.session?.user?.id;
+      const uid = getLocalSession() ? "local" : "";
       if (!uid || cancelled) return;
       const target = await resolveRoleRedirect();
       if (cancelled) return;
@@ -109,28 +124,14 @@ export default function LoginPage() {
         }
         navigate(target);
       } else if (mode === "signup") {
-        const { error: signErr } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: {
-            emailRedirectTo: `${window.location.origin}/login`,
-          },
-        });
-        if (signErr) throw signErr;
+        await signUpViaApi(email.trim(), password);
         setInfo(
-          "Account ban gaya. Apna email Super Admin ko bhejiye taaki wo aapko role assign kar sakein.",
+          "Account DigitalOcean pe save ho gaya. Super Admin ko email bhejiye taaki wo aapko role assign kar sakein.",
         );
         setMode("signin");
       } else {
-        const { error: resetErr } = await supabase.auth.resetPasswordForEmail(
-          email.trim(),
-          {
-            redirectTo: `${window.location.origin}/reset-password`,
-          },
-        );
-        if (resetErr) throw resetErr;
         setInfo(
-          "Password reset link aapke email par bhej diya gaya. Inbox / Spam check kariye. Dobara bhejne ke liye 'Send Reset Link' phir se dabaiye.",
+          "Email delivery DigitalOcean par configured nahi hai. Login karke Profile se password change kariye, ya Super Admin se reset karwayein.",
         );
       }
     } catch (err: unknown) {
@@ -339,9 +340,7 @@ export default function LoginPage() {
                     ? "Enter Admin Panel"
                     : mode === "signup"
                       ? "Request Access"
-                      : info
-                        ? "Resend Reset Link"
-                        : "Send Reset Link"}
+                      : "How to reset"}
                 </>
               )}
               </span>
@@ -352,13 +351,13 @@ export default function LoginPage() {
             {mode === "signin"
               ? "Dev login: admin@karoonline.local / KaroAdmin@2026"
               : mode === "signup"
-                ? "Account ban-ne ke baad Super Admin aapko role assign karenge."
-                : "Reset link aapke registered email par jayega. Spam folder bhi check kariye."}
+                ? "Account DigitalOcean pe save hoga. Super Admin role assign karenge."
+                : "Password Profile se change hota hai. Super Admin bhi reset kar sakte hain."}
           </p>
         </div>
 
         <p className="text-center text-[10px] mt-4 tracking-widest uppercase" style={{ color: "var(--admin-section)" }}>
-          Protected by Lovable Cloud · Encrypted Session
+          Protected session · DigitalOcean Postgres
         </p>
       </div>
     </div>

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Crown, Lock, Mail, LogOut, Loader2, ShieldCheck, ArrowLeft, User } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { Crown, Lock, Mail, LogOut, Loader2, ArrowLeft, User } from "lucide-react";
 import { apiFetch, extractRoles, type AdminMe } from "@/lib/api";
+import { clearLocalSession, getLocalSession, saveLocalSession } from "@/lib/local-session";
 import { GoldButton, GoldCard, PageHeader } from "@/components/admin/AdminLayout";
 
 export default function ProfilePage() {
@@ -21,21 +21,20 @@ export default function ProfilePage() {
   const [pwdMsg, setPwdMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [pwdBusy, setPwdBusy] = useState(false);
 
-  const [resetBusy, setResetBusy] = useState(false);
-  const [resetMsg, setResetMsg] = useState<string | null>(null);
-
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      const u = data.session?.user;
-      if (!u) {
+      const local = getLocalSession();
+      if (!local) {
         navigate("/login");
         return;
       }
-      setEmail(u.email ?? "");
-      setNewEmail(u.email ?? "");
+      setEmail(local.email ?? "");
+      setNewEmail(local.email ?? "");
       try {
         const me = await apiFetch<AdminMe>("/v1/admin/me");
+        const nextEmail = me.email ?? me.user?.email ?? local.email ?? "";
+        setEmail(nextEmail);
+        setNewEmail(nextEmail);
         setRoles(extractRoles(me));
       } catch {
         setRoles(["admin"]);
@@ -51,14 +50,20 @@ export default function ProfilePage() {
       setEmailMsg({ type: "err", text: "Naya email daaliye." });
       return;
     }
+    if (!currentPwd) {
+      setEmailMsg({ type: "err", text: "Current password daaliye (password box)." });
+      return;
+    }
     setEmailBusy(true);
     try {
-      const { error } = await supabase.auth.updateUser({ email: newEmail.trim() });
-      if (error) throw error;
-      setEmailMsg({
-        type: "ok",
-        text: "Confirmation link aapke naye email par bhej diya. Confirm karne ke baad email change ho jayega.",
+      await apiFetch("/v1/auth/account", {
+        method: "PATCH",
+        body: JSON.stringify({ current_password: currentPwd, email: newEmail.trim() }),
       });
+      const local = getLocalSession();
+      if (local) saveLocalSession({ ...local, email: newEmail.trim() });
+      setEmail(newEmail.trim());
+      setEmailMsg({ type: "ok", text: "Email DigitalOcean pe update ho gaya." });
     } catch (err: unknown) {
       setEmailMsg({ type: "err", text: err instanceof Error ? err.message : "Update fail." });
     } finally {
@@ -79,18 +84,11 @@ export default function ProfilePage() {
     }
     setPwdBusy(true);
     try {
-      const { error: signErr } = await supabase.auth.signInWithPassword({
-        email,
-        password: currentPwd,
+      await apiFetch("/v1/auth/account", {
+        method: "PATCH",
+        body: JSON.stringify({ current_password: currentPwd, password: newPwd }),
       });
-      if (signErr) {
-        setPwdMsg({ type: "err", text: "Current password galat hai." });
-        setPwdBusy(false);
-        return;
-      }
-      const { error } = await supabase.auth.updateUser({ password: newPwd });
-      if (error) throw error;
-      setPwdMsg({ type: "ok", text: "Password update ho gaya." });
+      setPwdMsg({ type: "ok", text: "Password DigitalOcean pe update ho gaya." });
       setCurrentPwd("");
       setNewPwd("");
       setNewPwd2("");
@@ -101,24 +99,8 @@ export default function ProfilePage() {
     }
   };
 
-  const sendResetLink = async () => {
-    setResetMsg(null);
-    setResetBusy(true);
-    try {
-      const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/reset-password`,
-      });
-      if (error) throw error;
-      setResetMsg("Reset link aapke email par bhej diya.");
-    } catch (err: unknown) {
-      setResetMsg(err instanceof Error ? err.message : "Fail.");
-    } finally {
-      setResetBusy(false);
-    }
-  };
-
   const logout = async () => {
-    await supabase.auth.signOut();
+    clearLocalSession();
     navigate("/login");
   };
 
@@ -254,18 +236,9 @@ export default function ProfilePage() {
                 {pwdMsg.text}
               </div>
             )}
-            <div className="flex flex-wrap gap-2">
-              <GoldButton type="submit" disabled={pwdBusy}>
-                {pwdBusy ? "Updating..." : "Update Password"}
-              </GoldButton>
-              <GoldButton variant="outline" onClick={sendResetLink} disabled={resetBusy}>
-                <span className="inline-flex items-center gap-1.5">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  {resetBusy ? "Sending..." : "Email me a reset link"}
-                </span>
-              </GoldButton>
-            </div>
-            {resetMsg && <p className="text-[11px] text-[#f5d97a]/80">{resetMsg}</p>}
+            <GoldButton type="submit" disabled={pwdBusy}>
+              {pwdBusy ? "Updating..." : "Update Password"}
+            </GoldButton>
           </form>
         </GoldCard>
       </div>

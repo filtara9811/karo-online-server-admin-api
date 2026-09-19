@@ -16,6 +16,7 @@ import QrLandingPage from "@/pages/QrLandingPage";
 import CardLandingPage from "@/pages/CardLandingPage";
 import ReferralLandingPage from "@/pages/ReferralLandingPage";
 import FormLandingPage from "@/pages/FormLandingPage";
+import HomeCatalogPage from "@/pages/HomeCatalogPage";
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="/shipping-policy" element={<LegalPage slug="shipping" />} />
         <Route path="/refund-policy" element={<LegalPage slug="refund" />} />
       </Route>
+      <Route path="/home" element={<HomeCatalogPage />} />
       <Route path="/s/:code" element={<ShopLandingPage />} />
       <Route path="/q/:code" element={<QrLandingPage />} />
       <Route path="/c/:code" element={<CardLandingPage />} />

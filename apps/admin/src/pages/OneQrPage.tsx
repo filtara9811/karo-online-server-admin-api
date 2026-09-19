@@ -62,6 +62,18 @@ export default function OneQrPage() {
         }),
       ),
   });
+  const projectsQ = useQuery({
+    queryKey: ["admin-table", "qr_projects"],
+    queryFn: async () =>
+      asList(await apiFetch("/v1/admin/table/qr_projects")).map((r) => ({
+        id: str(r.id),
+        title: str(r.title ?? r.business_name ?? r.name),
+        slug: str(r.slug),
+        is_paid: bool(r.is_paid),
+        share_code: r.share_code == null ? null : str(r.share_code),
+        created_at: r.created_at == null ? null : str(r.created_at),
+      })),
+  });
   const merchantsQ = useQuery({
     queryKey: ["admin-table", "merchant_link_settings"],
     queryFn: async () =>
@@ -86,8 +98,9 @@ export default function OneQrPage() {
   const visits = visitsQ.data ?? [];
   const themes = themesQ.data ?? [];
   const merchants = merchantsQ.data ?? [];
-  const loading = visitsQ.isLoading || themesQ.isLoading || merchantsQ.isLoading;
-  const err = visitsQ.error || themesQ.error || merchantsQ.error;
+  const projects = projectsQ.data ?? [];
+  const loading = visitsQ.isLoading || themesQ.isLoading || merchantsQ.isLoading || projectsQ.isLoading;
+  const err = visitsQ.error || themesQ.error || merchantsQ.error || projectsQ.error;
 
   const stats = useMemo(() => {
     const today = new Date().toDateString();
@@ -112,7 +125,7 @@ export default function OneQrPage() {
     <>
       <PageHeader
         title="One QR Business"
-        subtitle="Scans, visitor leads, landing themes aur merchant link settings — sab ek jagah"
+        subtitle="Karo leads + Assan Grow QR projects — one admin, one DigitalOcean database"
         action={
           <Link to="/qr-assets">
             <GoldButton variant="outline" size="sm">
@@ -130,6 +143,7 @@ export default function OneQrPage() {
               visitsQ.refetch();
               themesQ.refetch();
               merchantsQ.refetch();
+              projectsQ.refetch();
             }}
           />
         </div>
@@ -148,6 +162,26 @@ export default function OneQrPage() {
             <Stat label="Captured leads" value={stats.leads} icon={Users} />
             <Stat label="One QR shops" value={stats.shops} icon={Link2} />
           </div>
+
+          <GoldCard className="p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <QrCode className="h-4 w-4 text-[#d4af37]" />
+              <h3 className="font-display font-bold text-[#fff8dc]">Assan Grow QR projects</h3>
+            </div>
+            <ul className="space-y-2 max-h-[320px] overflow-y-auto">
+              {projects.map((p) => (
+                <li key={p.id} className="flex items-center justify-between rounded-xl border border-[#d4af37]/20 bg-black/25 px-3 py-2.5">
+                  <div>
+                    <p className="text-sm text-[#fff8dc]">{p.title}</p>
+                    <p className="text-[11px] text-[#f5d97a]/60">
+                      /s/{p.share_code || p.slug}?p={p.slug} · {p.is_paid ? "paid" : "draft"}
+                    </p>
+                  </div>
+                </li>
+              ))}
+              {projects.length === 0 && <p className="text-xs text-[#f5d97a]/60">No Grow projects yet.</p>}
+            </ul>
+          </GoldCard>
 
           <GoldCard className="p-5">
             <div className="flex items-center gap-2 mb-4">

@@ -80,8 +80,9 @@ export function mountStaticSites(app: Express) {
   const web = webDist();
 
   if (admin) {
-    app.use("/admin", express.static(admin, { index: false, maxAge: "1h" }));
+    app.use("/admin", express.static(admin, { index: false, maxAge: 0, etag: false, lastModified: false }));
     app.get(/^\/admin(?:\/.*)?$/, (_req, res) => {
+      res.setHeader("Cache-Control", "no-store");
       res.sendFile(path.join(admin, "index.html"));
     });
     console.log(`[karo-api] admin UI  ${admin}  → /admin`);

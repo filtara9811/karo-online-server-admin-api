@@ -13,9 +13,11 @@ function required(name: string, fallback?: string): string {
 }
 
 export const env = {
-  supabaseUrl: required("SUPABASE_URL", "https://vnznexcljflhqethnjlh.supabase.co"),
-  supabasePublishableKey: required("SUPABASE_PUBLISHABLE_KEY"),
+  supabaseUrl: optional("SUPABASE_URL", "https://vnznexcljflhqethnjlh.supabase.co"),
+  supabasePublishableKey: optional("SUPABASE_PUBLISHABLE_KEY"),
   supabaseServiceRoleKey: optional("SUPABASE_SERVICE_ROLE_KEY"),
+  databaseUrl: optional("DATABASE_URL"),
+  jwtSecret: optional("JWT_SECRET", "karo-dev-jwt-secret"),
   port: Number(optional("PORT", "4000")) || 4000,
   internalHookSecret: optional("INTERNAL_HOOK_SECRET"),
   googleMapsServerKey: optional("GOOGLE_MAPS_SERVER_KEY"),
@@ -25,8 +27,12 @@ export const env = {
   publicSiteUrl: optional("PUBLIC_SITE_URL", "https://karoonline.in"),
 };
 
-export const SERVICE_ROLE_MISSING = "SUPABASE_SERVICE_ROLE_KEY missing";
+export const SERVICE_ROLE_MISSING = "DATABASE_URL missing — DigitalOcean Postgres is required";
+
+export function hasDatabase(): boolean {
+  return Boolean(env.databaseUrl);
+}
 
 export function hasServiceRole(): boolean {
-  return Boolean(env.supabaseServiceRoleKey);
+  return hasDatabase();
 }

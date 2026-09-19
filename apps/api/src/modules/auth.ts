@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { hasServiceRole } from "../config/env.js";
+import { hasDatabase, hasServiceRole } from "../config/env.js";
 import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/respond.js";
 import {
   FinalizeCustomerSchema,
@@ -26,6 +26,7 @@ const AdminLoginSchema = z.object({
 authRouter.post(
   "/admin-login",
   asyncHandler(async (req, res) => {
+    if (!hasDatabase()) return fail(res, 503, "DATABASE_URL missing — DigitalOcean Postgres is required");
     const parsed = AdminLoginSchema.safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const sb = createAnonClient();
@@ -43,6 +44,73 @@ authRouter.post(
       },
       user: { id: data.user?.id, email: data.user?.email },
     });
+  }),
+);
+
+authRouter.post(
+  "/admin-signup",
+  asyncHandler(async (req, res) => {
+    if (!hasDatabase()) return fail(res, 503, "DATABASE_URL missing — DigitalOcean Postgres is required");
+    const parsed = AdminLoginSchema.safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const admin = getServiceRoleClient();
+    const created = await admin.auth.admin.createUser({
+      email: parsed.data.email,
+      password: parsed.data.password,
+      email_confirm: true,
+      user_metadata: { requested_admin: true },
+    });
+    if (created.error || !created.data.user) {
+      const msg = created.error?.message || "Signup failed";
+      if (/already registered/i.test(msg)) {
+        return fail(res, 409, "Is email pe account pehle se hai. Sign in kariye.");
+      }
+      return fail(res, 400, msg);
+    }
+    return ok(res, { user: { id: created.data.user.id, email: parsed.data.email } });
+  }),
+);
+
+authRouter.post(
+  "/forgot-password",
+  asyncHandler(async (_req, res) => {
+    return ok(res, {
+      message:
+        "Email delivery DigitalOcean par configured nahi hai. Login karke Profile se password change kariye, ya Super Admin se reset karwayein.",
+    });
+  }),
+);
+
+const AccountPatchSchema = z.object({
+  current_password: z.string().min(6).max(200),
+  password: z.string().min(6).max(200).optional(),
+  email: z.string().email().optional(),
+});
+
+authRouter.patch(
+  "/account",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    if (!hasDatabase()) return fail(res, 503, "DATABASE_URL missing — DigitalOcean Postgres is required");
+    const parsed = AccountPatchSchema.safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    if (!parsed.data.password && !parsed.data.email) {
+      return fail(res, 400, "Email ya naya password daaliye.");
+    }
+    const email = String(req.authUser?.email ?? "");
+    if (!email) return fail(res, 400, "Account email missing.");
+    const admin = getServiceRoleClient();
+    const { error: signErr } = await admin.auth.signInWithPassword({
+      email,
+      password: parsed.data.current_password,
+    });
+    if (signErr) return fail(res, 401, "Current password galat hai.");
+    const { data, error } = await admin.auth.admin.updateUserById(req.userId!, {
+      email: parsed.data.email,
+      password: parsed.data.password,
+    });
+    if (error || !data.user) return fail(res, 400, error?.message || "Update failed");
+    return ok(res, { user: { id: data.user.id, email: data.user.email ?? parsed.data.email ?? email } });
   }),
 );
 

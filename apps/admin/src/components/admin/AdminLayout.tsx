@@ -36,8 +36,8 @@ import {
   ScanLine,
   Video,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
 import { apiFetch, extractRoles, isAdminRoles, type AdminMe } from "@/lib/api";
+import { clearLocalSession, getLocalSession } from "@/lib/local-session";
 import { ThemeToggle } from "@/theme";
 import { ErrorBanner } from "./ErrorBanner";
 import { FloatingPhoneMockup } from "./FloatingPhoneMockup";
@@ -144,8 +144,8 @@ export function AdminLayout({ children }: { children?: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data: sess } = await supabase.auth.getSession();
-      const user = sess.session?.user;
+      const local = getLocalSession();
+      const user = local ? { id: "local", email: local.email ?? null } : null;
       if (!user) {
         navigate("/login", { replace: true });
         return;
@@ -155,7 +155,7 @@ export function AdminLayout({ children }: { children?: ReactNode }) {
         const r = extractRoles(me);
         const ok = r.length === 0 || isAdminRoles(r);
         if (!ok) {
-          await supabase.auth.signOut();
+          clearLocalSession();
           navigate("/login", { replace: true });
           return;
         }
@@ -167,7 +167,7 @@ export function AdminLayout({ children }: { children?: ReactNode }) {
       } catch (err: unknown) {
         const status = err && typeof err === "object" && "status" in err ? Number((err as { status: number }).status) : 0;
         if (status === 401 || status === 403) {
-          await supabase.auth.signOut();
+          clearLocalSession();
           navigate("/login", { replace: true });
           return;
         }
@@ -188,7 +188,7 @@ export function AdminLayout({ children }: { children?: ReactNode }) {
   }, [location.pathname]);
 
   const logout = async () => {
-    await supabase.auth.signOut();
+    clearLocalSession();
     navigate("/login");
   };
 

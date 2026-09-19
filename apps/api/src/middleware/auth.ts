@@ -42,7 +42,7 @@ export function requireServiceRole(req: Request, res: Response, next: NextFuncti
 
 export function adminFromRequest() {
   const client = tryServiceRole();
-  if (!client) throw new Error("SUPABASE_SERVICE_ROLE_KEY missing");
+  if (!client) throw new Error("DATABASE_URL missing — DigitalOcean Postgres is required");
   return client;
 }
 

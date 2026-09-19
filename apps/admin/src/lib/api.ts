@@ -1,4 +1,4 @@
-import { supabase } from "./supabase";
+import { getLocalSession } from "./local-session";
 
 export class ApiError extends Error {
   status: number;
@@ -25,12 +25,15 @@ export function apiBase() {
   return envBase;
 }
 
+export async function accessToken(): Promise<string | null> {
+  return getLocalSession()?.access_token ?? null;
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  const token = await accessToken();
   const base = apiBase();
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type") && init?.body) {

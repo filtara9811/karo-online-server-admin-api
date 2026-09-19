@@ -46,6 +46,7 @@ function cfgStr(cfg: Record<string, unknown>, key: string) {
 export default function SmsPage() {
   const [rows, setRows] = useState<Gw[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["admin-table", "sms_gateways"],
@@ -59,6 +60,7 @@ export default function SmsPage() {
   const save = async (g: Gw) => {
     setSaving(g.id);
     setErr(null);
+    setSaved(null);
     try {
       await apiFetch(`/v1/admin/table/sms_gateways?id=${encodeURIComponent(g.id)}`, {
         method: "PATCH",
@@ -68,6 +70,7 @@ export default function SmsPage() {
           config: g.config,
         }),
       });
+      setSaved(g.display_name);
       await q.refetch();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "Save fail");
@@ -78,7 +81,10 @@ export default function SmsPage() {
 
   return (
     <>
-      <PageHeader title="SMS Gateways" subtitle="OTP keys DB se — sirf ek active rahega" />
+      <PageHeader
+        title="SMS Gateways"
+        subtitle="OTP keys DigitalOcean Postgres se — sirf ek active rahega. Purane Supabase keys is dump me nahi aaye; yahan paste karke Save kariye."
+      />
       {q.isError && (
         <div className="mb-4">
           <ErrorBanner message={q.error instanceof Error ? q.error.message : "Load fail"} onRetry={() => q.refetch()} />
@@ -89,13 +95,18 @@ export default function SmsPage() {
           <ErrorBanner message={err} />
         </div>
       )}
+      {saved && (
+        <div className="mb-4 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+          {saved} DigitalOcean pe save ho gaya.
+        </div>
+      )}
       {q.isLoading ? (
         <GoldCard className="p-16 grid place-items-center">
           <Loader2 className="h-6 w-6 animate-spin text-[#d4af37]" />
         </GoldCard>
       ) : rows.length === 0 ? (
         <GoldCard className="p-12 text-center text-sm text-[#d4af37]/70">
-          sms_gateways me koi row nahi mili.
+          SMS gateway cards load nahi hui. Page refresh kariye — API MSG91 aur Fast2SMS rows insert karegi.
         </GoldCard>
       ) : (
         <div className="grid sm:grid-cols-2 gap-4">

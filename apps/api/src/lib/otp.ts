@@ -137,6 +137,8 @@ export async function issuePhoneSession(phone: string) {
   return {
     userId: authUser.userId,
     email: authUser.email,
+    access_token: s.access_token,
+    refresh_token: s.refresh_token,
     session: {
       access_token: s.access_token,
       refresh_token: s.refresh_token,
@@ -197,15 +199,17 @@ export async function logSystem(
   message: string,
   meta: unknown = {},
 ): Promise<boolean> {
+  const text = message.slice(0, 500);
+  console[status === "error" ? "error" : "log"](`[otp] ${provider ?? kind} ${status}: ${text}`);
   try {
     const admin = tryServiceRole();
     if (!admin) return false;
-    const { error } = await admin.rpc("log_system_event", {
-      _kind: kind,
-      _provider: provider,
-      _status: status,
-      _message: message.slice(0, 500),
-      _meta: meta,
+    const { error } = await admin.from("system_logs").insert({
+      kind,
+      provider,
+      status,
+      message: text,
+      meta: meta ?? {},
     });
     if (error) {
       console.error("[system_logs.insert] rejected", error.message);
@@ -332,10 +336,15 @@ async function sendViaFast2SMS(
             }
           })()
         : {}
-    ) as { return?: boolean; message?: unknown };
-    if (!res.ok || json.return === false) {
+    ) as { return?: boolean | string; message?: unknown; status_code?: number };
+    const accepted = json.return === true || json.return === "true";
+    if (!res.ok || !accepted) {
       const msg =
-        typeof json.message === "string" ? json.message : JSON.stringify(json).slice(0, 300);
+        typeof json.message === "string"
+          ? json.message
+          : Array.isArray(json.message)
+            ? json.message.map(String).join("; ")
+            : JSON.stringify(json).slice(0, 300);
       if (/invalid sender id/i.test(msg)) {
         return {
           ok: false,
@@ -344,7 +353,7 @@ async function sendViaFast2SMS(
           raw: json,
         };
       }
-      return { ok: false, error: `Fast2SMS ${res.status}: ${msg}`, raw: json };
+      return { ok: false, error: `Fast2SMS ${json.status_code ?? res.status}: ${msg}`, raw: json };
     }
     return { ok: true, raw: json };
   } catch (e) {
@@ -600,21 +609,13 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
     .limit(1);
   if (recent && recent.length > 0) {
     const lastIssued = new Date(recent[0].created_at).getTime();
-    const cooldownRemaining = Number.isFinite(lastIssued)
-      ? Math.max(1, 60 - Math.floor((Date.now() - lastIssued) / 1000))
-      : 60;
-    await logSystem("otp", providerLabel, "success", "OTP cooldown active — existing code reused", {
-      phone_last4: phone.slice(-4),
-      cooldown_remaining: cooldownRemaining,
-    });
-
-    return {
-      ok: true,
-      test_mode: false,
-      reused: true,
-      channel: channelUsed,
-      cooldown_remaining: cooldownRemaining,
-    };
+    const since = Date.now() - lastIssued;
+    if (Number.isFinite(lastIssued) && since < 8_000) {
+      return {
+        ok: false,
+        error: "OTP abhi bheja gaya. Kuch seconds baad Resend OTP dabaiye.",
+      };
+    }
   }
 
   const code = String(randomInt(1000, 10000));
@@ -672,6 +673,7 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
   }
 
   if (!result.ok) {
+    await admin.from("otp_codes").delete().eq("phone", phone).is("verified_at", null);
     await logSystem("sms", providerLabel, "error", result.error ?? "Unknown error", {
       phone_last4: phone.slice(-4),
       provider_response: asJson(result.raw),

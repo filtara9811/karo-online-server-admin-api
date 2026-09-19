@@ -90,6 +90,60 @@ export async function getNearbyDigitalShops(data: z.infer<typeof NearbyShopsSche
 export async function fetchPublicLanding(code: string, project?: string | null, kind = "q") {
   const { publicLanding, tableMissing } = await import("./memory.js");
   const seeded = { ...publicLanding(kind, code), project: project ?? null };
+  try {
+    const admin = getServiceRoleClient();
+    let proj: Record<string, unknown> | null = null;
+    if (project) {
+      const bySlug = await admin.from("qr_projects").select("*").eq("slug", project).maybeSingle();
+      proj = bySlug.data ?? null;
+      if (!proj) {
+        const byId = await admin.from("qr_projects").select("*").eq("id", project).maybeSingle();
+        proj = byId.data ?? null;
+      }
+    }
+    if (!proj) {
+      const byShare = await admin.from("qr_projects").select("*").eq("share_code", code).maybeSingle();
+      proj = byShare.data ?? null;
+    }
+    if (!proj) {
+      const byShop = await admin.from("digital_shops").select("*").eq("slug", code).maybeSingle();
+      if (byShop.data?.project_id) {
+        const p = await admin.from("qr_projects").select("*").eq("id", byShop.data.project_id).maybeSingle();
+        proj = p.data ?? null;
+      }
+    }
+    const identity = await resolveShopIdentity(code, project ?? null);
+    let products: unknown[] = seeded.products as unknown[];
+    if (proj?.id) {
+      const items = await admin.from("shop_products").select("*").eq("project_id", proj.id).eq("is_active", true);
+      if (!items.error && items.data?.length) products = items.data;
+    }
+    const name =
+      (typeof proj?.business_name === "string" && proj.business_name) ||
+      (typeof proj?.title === "string" && proj.title) ||
+      identity.name ||
+      seeded.name;
+    return {
+      ok: true,
+      kind,
+      code,
+      project: project ?? (typeof proj?.slug === "string" ? proj.slug : null),
+      name,
+      title: name,
+      description: (proj?.description as string | undefined) ?? seeded.description,
+      phone: (proj?.contact_phone as string | undefined) ?? seeded.phone,
+      whatsapp: (proj?.contact_phone as string | undefined) ?? seeded.whatsapp,
+      trade: (proj?.category as string | undefined) ?? identity.name ?? seeded.trade,
+      accent: (proj?.accent_color as string | undefined) ?? identity.accent,
+      theme_key: proj?.theme_key ?? null,
+      is_online: true,
+      products,
+      stats: { views: seeded.stats?.views ?? 1, products: products.length, rating: 4.8 },
+      visit_count: seeded.visit_count ?? 1,
+    };
+  } catch {
+    /* fall through */
+  }
   const client = createAnonClient();
   const { data, error } = await client.rpc("get_public_landing", {
     _code: code,

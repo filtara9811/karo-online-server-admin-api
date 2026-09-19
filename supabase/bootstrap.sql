@@ -1,8 +1,6 @@
 -- Karo Online — minimum schema for an EMPTY new project only.
 -- Do NOT run this on lxwttwccbtxdpnrzadgj (production). It must not alter live data.
 
-create extension if not exists "pgcrypto";
-
 create table if not exists public.user_roles (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null unique,
@@ -193,14 +191,33 @@ insert into public.test_accounts (phone, otp_code, enabled)
 values ('9999999999', '1234', true)
 on conflict (phone) do nothing;
 
-insert into public.catalog_types (id, name, slug, sort_order)
-values ('11111111-1111-4111-8111-111111111111', 'Service', 'service', 1)
+insert into public.catalog_types (id, name, slug, sort_order, is_active)
+values ('11111111-1111-4111-8111-111111111111', 'Service', 'service', 1, true)
 on conflict do nothing;
 
-insert into public.categories (id, name, slug, parent_id, sort_order, image_url) values
-  ('22222222-2222-4222-8222-222222222221', 'Home repair', 'home-repair', null, 1, '🔧'),
-  ('22222222-2222-4222-8222-222222222222', 'Electrician', 'electrician', '22222222-2222-4222-8222-222222222221', 1, '⚡'),
-  ('22222222-2222-4222-8222-222222222223', 'Plumber', 'plumber', '22222222-2222-4222-8222-222222222221', 2, '🚰')
+insert into public.categories (id, name, slug, parent_id, sort_order, image_url, type_id, is_active) values
+  ('22222222-2222-4222-8222-222222222221', 'Home repair', 'home-repair', null, 1, '🔧', '11111111-1111-4111-8111-111111111111', true),
+  ('22222222-2222-4222-8222-222222222222', 'Electrician', 'electrician', '22222222-2222-4222-8222-222222222221', 1, '⚡', '11111111-1111-4111-8111-111111111111', true),
+  ('22222222-2222-4222-8222-222222222223', 'Plumber', 'plumber', '22222222-2222-4222-8222-222222222221', 2, '🚰', '11111111-1111-4111-8111-111111111111', true),
+  ('22222222-2222-4222-8222-222222222224', 'AC repair', 'ac-repair', '22222222-2222-4222-8222-222222222221', 3, '❄️', '11111111-1111-4111-8111-111111111111', true)
+on conflict do nothing;
+
+insert into public.catalog_items (id, name, category_id, sort_order, is_active) values
+  ('33333333-3333-4333-8333-333333333331', 'Fan / switch', '22222222-2222-4222-8222-222222222222', 1, true),
+  ('33333333-3333-4333-8333-333333333332', 'Tap leak', '22222222-2222-4222-8222-222222222223', 1, true),
+  ('33333333-3333-4333-8333-333333333333', 'AC not cooling', '22222222-2222-4222-8222-222222222224', 1, true)
+on conflict do nothing;
+
+insert into public.vendors (id, user_id, business_name, owner_name, status, is_online, lat, lng, service_radius_km) values
+  ('44444444-4444-4444-8444-444444444441', '44444444-4444-4444-8444-444444444441', 'Gold Hands Electric', 'Ravi', 'active', true, 28.6602, 77.244, 10),
+  ('44444444-4444-4444-8444-444444444442', '44444444-4444-4444-8444-444444444442', 'Quick Fix Plumbing', 'Aman', 'active', true, 28.6532, 77.243, 10),
+  ('44444444-4444-4444-8444-444444444443', '44444444-4444-4444-8444-444444444443', 'Cool Air AC', 'Neha', 'active', false, 28.6642, 77.237, 12)
+on conflict do nothing;
+
+insert into public.vendor_item_mappings (id, vendor_id, item_id, is_active) values
+  ('55555555-5555-4555-8555-555555555551', '44444444-4444-4444-8444-444444444441', '33333333-3333-4333-8333-333333333331', true),
+  ('55555555-5555-4555-8555-555555555552', '44444444-4444-4444-8444-444444444442', '33333333-3333-4333-8333-333333333332', true),
+  ('55555555-5555-4555-8555-555555555553', '44444444-4444-4444-8444-444444444443', '33333333-3333-4333-8333-333333333333', true)
 on conflict do nothing;
 
 create or replace function public.get_admin_stats()
@@ -211,3 +228,13 @@ returns jsonb language sql stable as $$
     'staff', jsonb_build_object('total', 0, 'week', 0, 'month', 0, 'blocked', 0)
   );
 $$;
+
+alter table public.vendors add column if not exists is_blocked boolean default false;
+alter table public.vendors add column if not exists live_lat double precision;
+alter table public.vendors add column if not exists live_lng double precision;
+alter table public.vendors add column if not exists location_updated_at timestamptz;
+alter table public.vendors add column if not exists operation_mode text;
+alter table public.customers add column if not exists support_code text;
+alter table public.customers add column if not exists first_name text;
+alter table public.customers add column if not exists last_name text;
+alter table public.customers add column if not exists privacy_accepted boolean default false;

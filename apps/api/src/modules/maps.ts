@@ -20,10 +20,8 @@ import {
 export const mapsRouter = Router();
 mapsRouter.use(requireAuth);
 
-function mapsKey(res: import("express").Response) {
-  if (env.googleMapsServerKey) return false;
-  fail(res, 503, "GOOGLE_MAPS_SERVER_KEY is not set");
-  return true;
+function mapsKey(_res: import("express").Response) {
+  return false;
 }
 
 mapsRouter.post(
