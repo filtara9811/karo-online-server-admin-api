@@ -411,7 +411,7 @@ export function GoldCard({
   children,
   className = "",
 }: {
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
 }) {
   return (
