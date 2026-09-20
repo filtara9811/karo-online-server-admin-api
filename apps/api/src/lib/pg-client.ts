@@ -407,6 +407,16 @@ function makeQuery(table: string): QueryBuilder {
   return self;
 }
 
+function shapeRows(state: QueryState, rows: unknown[], rowCount: number | null) {
+  const count = rowCount ?? rows.length;
+  if (state.single === "maybe") return { data: rows[0] ?? null, error: null, count };
+  if (state.single === "one") {
+    if (!rows[0]) return { data: null, error: { message: "JSON object requested, multiple (or no) rows returned" }, count };
+    return { data: rows[0], error: null, count };
+  }
+  return { data: rows, error: null, count };
+}
+
 async function execute(state: QueryState) {
   try {
     const db = getPool();
@@ -438,7 +448,7 @@ async function execute(state: QueryState) {
       }
       sql += " returning *";
       const res = await db.query(sql, params);
-      return { data: res.rows, error: null, count: res.rowCount ?? res.rows.length };
+      return shapeRows(state, res.rows, res.rowCount);
     }
     if (state.op === "update") {
       const rec = (state.payload ?? {}) as Record<string, unknown>;
@@ -451,13 +461,13 @@ async function execute(state: QueryState) {
       const f = applyFilters(state.filters, params.length + 1);
       const sql = `update ${table} set ${sets.join(",")}${f.sql} returning *`;
       const res = await db.query(sql, [...params, ...f.params]);
-      return { data: res.rows, error: null, count: res.rowCount ?? res.rows.length };
+      return shapeRows(state, res.rows, res.rowCount);
     }
     if (state.op === "delete") {
       const f = applyFilters(state.filters);
       const sql = `delete from ${table}${f.sql} returning *`;
       const res = await db.query(sql, f.params);
-      return { data: res.rows, error: null, count: res.rowCount ?? res.rows.length };
+      return shapeRows(state, res.rows, res.rowCount);
     }
 
     const f = applyFilters(state.filters);

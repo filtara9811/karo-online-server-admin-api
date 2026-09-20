@@ -25,6 +25,7 @@ export const env = {
   lovableApiKey: optional("LOVABLE_API_KEY"),
   gatewayApiKey: optional("GATEWAYAPI_API_KEY"),
   publicSiteUrl: optional("PUBLIC_SITE_URL", "https://karoonline.in"),
+  youtubeApiKey: optional("YOUTUBE_API_KEY"),
 };
 
 export const SERVICE_ROLE_MISSING = "DATABASE_URL missing — DigitalOcean Postgres is required";
