@@ -109,7 +109,7 @@ function vh() {
 }
 
 function PhoneFrame({ device, indexOffset, onClose }: { device: Device; indexOffset: number; onClose: () => void }) {
-  const frameRef = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<HTMLElement | null>(null);
   const drag = useRef({ dx: 0, dy: 0, active: false });
   const [dragging, setDragging] = useState(false);
   const [state, setState] = useState<FrameState>(() => {
@@ -186,7 +186,9 @@ function PhoneFrame({ device, indexOffset, onClose }: { device: Device; indexOff
   if (state.minimized) {
     return (
       <button
-        ref={frameRef as React.RefObject<HTMLButtonElement>}
+        ref={(el) => {
+          frameRef.current = el;
+        }}
         type="button"
         className="fixed z-[999] h-14 w-14 rounded-2xl grid place-items-center text-[#1a1208] cursor-grab active:cursor-grabbing"
         style={{
