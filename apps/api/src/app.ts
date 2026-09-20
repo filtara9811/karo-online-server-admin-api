@@ -24,21 +24,25 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   const helmet = (
-    typeof helmetModule === "function" ? helmetModule : (helmetModule as { default: unknown }).default
-  ) as (options?: {
+    typeof helmetModule === "function"
+      ? helmetModule
+      : ((helmetModule as { default?: unknown }).default as unknown)
+  ) as ((options?: {
     contentSecurityPolicy?: false;
     crossOriginEmbedderPolicy?: false;
     crossOriginResourcePolicy?: { policy: "cross-origin" };
     frameguard?: false;
-  }) => RequestHandler;
-  app.use(
-    helmet({
-      contentSecurityPolicy: false,
-      crossOriginEmbedderPolicy: false,
-      crossOriginResourcePolicy: { policy: "cross-origin" },
-      frameguard: false,
-    }),
-  );
+  }) => RequestHandler) | undefined;
+  if (typeof helmet === "function") {
+    app.use(
+      helmet({
+        contentSecurityPolicy: false,
+        crossOriginEmbedderPolicy: false,
+        crossOriginResourcePolicy: { policy: "cross-origin" },
+        frameguard: false,
+      }),
+    );
+  }
   app.use(
     cors({
       origin: env.corsOrigin === "*" ? true : env.corsOrigin.split(",").map((s) => s.trim()),
@@ -56,6 +60,9 @@ export function createApp() {
   );
   app.use(express.urlencoded({ extended: true }));
 
+  app.get("/", (_req, res) => {
+    ok(res, { status: "up", service: "karo-api", service_role: hasServiceRole(), postgres: hasDatabase() });
+  });
   app.get("/health", (_req, res) => {
     ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
   });
@@ -97,3 +104,6 @@ export function createApp() {
 
   return app;
 }
+
+const app = createApp();
+export default app;
