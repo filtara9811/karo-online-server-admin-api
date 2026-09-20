@@ -22,6 +22,8 @@ function webDist() {
 
 function adminDist() {
   return firstExisting(
+    path.resolve(here, "../../public/admin"),
+    path.resolve(process.cwd(), "public/admin"),
     path.resolve(here, "../../../../apps/admin/dist"),
     path.resolve(process.cwd(), "../admin/dist"),
     path.resolve(process.cwd(), "../../apps/admin/dist"),
