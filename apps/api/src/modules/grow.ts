@@ -119,7 +119,11 @@ function jsonValue(v: unknown, fallback: unknown) {
   return v ?? fallback;
 }
 
-type YtThumb = { id: string; title: string; thumbnail: string | null };
+type YtThumb = { id: string; title: string; thumbnail: string };
+
+function ytThumb(id: string, title?: string | null): YtThumb {
+  return { id, title: title || "YouTube video", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
+}
 
 const YT_HEADERS = {
   "user-agent":
@@ -214,8 +218,7 @@ async function videosFromInvidious(idOrHandle: string): Promise<YtThumb[]> {
         const data = (await r.json()) as { videos?: Array<{ videoId?: string; title?: string }> } | Array<{ videoId?: string; title?: string }>;
         const rows = Array.isArray(data) ? data : data.videos ?? [];
         const videos = rows
-          .map((v) => (v.videoId ? { id: v.videoId, title: v.title || "YouTube video", thumbnail: `https://img.youtube.com/vi/${v.videoId}/hqdefault.jpg` } : null))
-          .filter((v): v is YtThumb => !!v)
+          .flatMap((v) => (v.videoId ? [ytThumb(v.videoId, v.title)] : []))
           .slice(0, 25);
         if (videos.length) return videos;
       } catch {
@@ -239,13 +242,10 @@ async function videosFromApi(channelId: string): Promise<YtThumb[]> {
   const r = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${qs}`, { signal: AbortSignal.timeout(8000) });
   if (!r.ok) return [];
   const j = (await r.json()) as { items?: Array<{ contentDetails?: { videoId?: string }; snippet?: { title?: string; resourceId?: { videoId?: string } } }> };
-  return (j.items ?? [])
-    .map((it) => {
-      const id = it.contentDetails?.videoId ?? it.snippet?.resourceId?.videoId;
-      if (!id) return null;
-      return { id, title: it.snippet?.title || "YouTube video", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
-    })
-    .filter((v): v is YtThumb => !!v);
+  return (j.items ?? []).flatMap((it) => {
+    const id = it.contentDetails?.videoId ?? it.snippet?.resourceId?.videoId;
+    return id ? [ytThumb(id, it.snippet?.title)] : [];
+  });
 }
 
 async function resolveHandle(handle: string): Promise<string | null> {
