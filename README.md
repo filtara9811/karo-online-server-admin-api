@@ -29,7 +29,7 @@ cd apps/admin && npm install && npm run dev
 - API: http://localhost:4000/health
 - Admin: http://localhost:5173/login
 
-One Vercel project serves both: `/v1/*` is the API, `/admin` is the gold panel. Browser hits on `/` redirect to `/admin`.
+One Vercel project serves all three: `/` is the public web, `/admin` is the gold panel, `/v1/*` is the API.
 
 Admin login uses the **same** Supabase email/password as `/admin/login` on karoonline.in. After login, the panel calls Express with the JWT.
 

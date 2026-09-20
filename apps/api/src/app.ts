@@ -60,13 +60,6 @@ export function createApp() {
   );
   app.use(express.urlencoded({ extended: true }));
 
-  app.get("/", (req, res) => {
-    if ((req.headers.accept ?? "").includes("text/html")) {
-      res.redirect(302, "/admin/");
-      return;
-    }
-    ok(res, { status: "up", service: "karo-api", service_role: hasServiceRole(), postgres: hasDatabase() });
-  });
   app.get("/health", (_req, res) => {
     ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
   });

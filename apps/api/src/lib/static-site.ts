@@ -9,11 +9,13 @@ import { fetchPublicLanding } from "./shops.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function firstExisting(...candidates: string[]) {
-  return candidates.find((p) => fs.existsSync(p)) ?? null;
+  return candidates.find((p) => fs.existsSync(path.join(p, "index.html"))) ?? null;
 }
 
 function webDist() {
   return firstExisting(
+    path.resolve(here, "../../public"),
+    path.resolve(process.cwd(), "public"),
     path.resolve(here, "../../../../apps/web/dist"),
     path.resolve(process.cwd(), "../web/dist"),
     path.resolve(process.cwd(), "../../apps/web/dist"),
