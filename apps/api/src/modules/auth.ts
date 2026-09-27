@@ -63,7 +63,7 @@ authRouter.post(
     if (created.error || !created.data.user) {
       const msg = created.error?.message || "Signup failed";
       if (/already registered/i.test(msg)) {
-        return fail(res, 409, "Is email pe account pehle se hai. Sign in kariye.");
+        return fail(res, 409, "An account with this email already exists. Please sign in.");
       }
       return fail(res, 400, msg);
     }
@@ -76,7 +76,7 @@ authRouter.post(
   asyncHandler(async (_req, res) => {
     return ok(res, {
       message:
-        "Email delivery DigitalOcean par configured nahi hai. Login karke Profile se password change kariye, ya Super Admin se reset karwayein.",
+        "Password reset email is not set up yet. Sign in and change your password from Profile, or ask a Super Admin to reset it.",
     });
   }),
 );
@@ -95,7 +95,7 @@ authRouter.patch(
     const parsed = AccountPatchSchema.safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     if (!parsed.data.password && !parsed.data.email) {
-      return fail(res, 400, "Email ya naya password daaliye.");
+      return fail(res, 400, "Enter your email and a new password.");
     }
     const email = String(req.authUser?.email ?? "");
     if (!email) return fail(res, 400, "Account email missing.");
@@ -104,7 +104,7 @@ authRouter.patch(
       email,
       password: parsed.data.current_password,
     });
-    if (signErr) return fail(res, 401, "Current password galat hai.");
+    if (signErr) return fail(res, 401, "Your current password is incorrect.");
     const { data, error } = await admin.auth.admin.updateUserById(req.userId!, {
       email: parsed.data.email,
       password: parsed.data.password,

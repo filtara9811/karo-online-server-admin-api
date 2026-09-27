@@ -1,6 +1,6 @@
 import { SignJWT, importPKCS8 } from "jose";
 import { z } from "zod";
-import type { DbClient } from "./pg-client.js";
+import { getPool, type DbClient } from "./pg-client.js";
 import { getServiceRoleClient } from "./supabase.js";
 
 export const TestPushSchema = z.object({
@@ -24,6 +24,75 @@ type ServiceAccount = {
   private_key: string;
   token_uri?: string;
 };
+
+export const FcmConfigSchema = z.object({
+  service_account_json: z.union([z.string().trim().min(2), z.record(z.string(), z.unknown())]),
+  is_active: z.boolean().optional(),
+});
+
+export async function getFcmStatus() {
+  const { rows } = await getPool().query(
+    `select project_id, service_account_json, is_active from public.firebase_services
+      where coalesce(service_key, 'fcm') = 'fcm' order by priority nulls last, created_at limit 1`,
+  );
+  const r = rows[0];
+  if (!r) return { configured: false, project_id: null, client_email: null, is_active: false };
+  const sa = (typeof r.service_account_json === "string" ? JSON.parse(r.service_account_json) : r.service_account_json) as
+    | Partial<ServiceAccount>
+    | null;
+  return {
+    configured: !!(sa?.client_email && sa?.private_key),
+    project_id: r.project_id as string | null,
+    client_email: sa?.client_email ?? null,
+    is_active: !!r.is_active,
+  };
+}
+
+/** Validates the service account by fetching a real FCM access token, then stores the single FCM row. */
+export async function saveFcmConfig(input: z.infer<typeof FcmConfigSchema>) {
+  let sa: Record<string, unknown>;
+  try {
+    sa = typeof input.service_account_json === "string" ? JSON.parse(input.service_account_json) : input.service_account_json;
+  } catch {
+    return { ok: false as const, error: "That is not valid JSON. Paste the whole service account file." };
+  }
+  const projectId = typeof sa.project_id === "string" ? sa.project_id : "";
+  if (sa.type !== "service_account" || !projectId || typeof sa.client_email !== "string" || typeof sa.private_key !== "string") {
+    return { ok: false as const, error: "This file is missing project_id, client_email or private_key. Download a new key from Firebase → Project settings → Service accounts." };
+  }
+  try {
+    await getAccessToken(sa as unknown as ServiceAccount);
+  } catch (e) {
+    return { ok: false as const, error: `Google rejected this key: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+  }
+  const c = await getPool().connect();
+  try {
+    await c.query("begin");
+    await c.query(`select pg_advisory_xact_lock(hashtext('firebase_services:fcm'))`);
+    const { rows } = await c.query(
+      `select id from public.firebase_services where coalesce(service_key, 'fcm') = 'fcm' order by priority nulls last, created_at limit 1`,
+    );
+    if (rows[0]) {
+      await c.query(
+        `update public.firebase_services set project_id = $2, service_account_json = $3::jsonb, is_active = $4, service_key = 'fcm' where id = $1`,
+        [rows[0].id, projectId, JSON.stringify(sa), input.is_active ?? true],
+      );
+    } else {
+      await c.query(
+        `insert into public.firebase_services (service_key, name, project_id, service_account_json, is_active, priority)
+         values ('fcm', 'Firebase Cloud Messaging', $1, $2::jsonb, $3, 1)`,
+        [projectId, JSON.stringify(sa), input.is_active ?? true],
+      );
+    }
+    await c.query("commit");
+  } catch (e) {
+    await c.query("rollback").catch(() => null);
+    throw e;
+  } finally {
+    c.release();
+  }
+  return { ok: true as const, ...(await getFcmStatus()) };
+}
 
 async function getAccessToken(sa: ServiceAccount): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
@@ -70,7 +139,7 @@ async function sendOne(opts: {
       priority: isHigh ? "HIGH" : "NORMAL",
       ttl: isHigh ? "60s" : "3600s",
       notification: {
-        channel_id: isHigh ? "lead_alerts_v2" : "default",
+        channel_id: isHigh ? "lead_alerts_v3" : "default",
         sound: isHigh ? "lead_ring" : "default",
         notification_priority: isHigh ? "PRIORITY_MAX" : "PRIORITY_DEFAULT",
         default_vibrate_timings: !isHigh,
@@ -152,7 +221,7 @@ export async function pushToUser(opts: {
   if (!fcm?.project_id || !fcm?.service_account_json) return { ok: false, reason: "fcm_not_configured" as const };
   const list = (tokens ?? [])
     .map((t) => ({ token: t.token as string, platform: String(t.platform ?? "unknown") }))
-    .filter((t) => t.token);
+    .filter((t, i, all) => t.token && all.findIndex((x) => x.token === t.token) === i);
   if (list.length === 0) return { ok: false, reason: "no_device_tokens" as const };
 
   let sa: ServiceAccount;
@@ -188,18 +257,9 @@ export async function pushToUser(opts: {
     results.push({ token: tk.token, platform: tk.platform, ...r });
     await admin.from("notification_logs").insert({
       user_id: opts.userId,
-      device_token: tk.token,
-      provider: "fcm",
-      channel: "push",
-      campaign_id: opts.campaignId ?? null,
-      status: r.ok ? "delivered" : "failed",
-      error: r.ok ? null : (r.error ?? `http_${r.status}`).slice(0, 500),
-      payload: {
-        title: opts.title,
-        body: opts.body,
-        action_url: opts.actionUrl ?? null,
-        kind: opts.extraData?.kind ?? null,
-      },
+      title: opts.title,
+      body: opts.body,
+      status: r.ok ? "delivered" : `failed: ${(r.error ?? `http_${r.status}`).slice(0, 300)}`,
     }).then(() => null, () => null);
     if (!r.ok && (r.status === 404 || r.status === 400)) {
       await admin.from("device_tokens").update({ is_active: false }).eq("token", tk.token);
@@ -284,7 +344,7 @@ export async function sendTestPush(
   }
   const list = (tokens ?? [])
     .map((t) => ({ token: t.token as string, platform: String(t.platform ?? "unknown") }))
-    .filter((t) => t.token);
+    .filter((t, i, all) => t.token && all.findIndex((x) => x.token === t.token) === i);
   if (list.length === 0) return { ok: false, reason: "no_device_tokens" as const, hint: "Open the app and Allow notifications first." };
 
   let sa: ServiceAccount;
@@ -316,15 +376,11 @@ export async function sendTestPush(
     });
     results.push({ ...r, token: tk.token, platform: tk.platform });
     await admin.from("notification_logs").insert({
-      trigger_id: data.trigger_id,
       user_id: targetUser,
-      device_token: tk.token,
-      provider: "fcm",
-      channel: "push",
-      status: r.ok ? "delivered" : "failed",
-      error: r.ok ? null : r.error?.slice(0, 500),
-      payload: { title: trig.title, body: trig.body, test: true, kind: "direct_test" },
-    });
+      title: trig.title,
+      body: trig.body,
+      status: r.ok ? "delivered" : `failed: ${(r.error ?? `http_${r.status}`).slice(0, 300)}`,
+    }).then(() => null, () => null);
     if (!r.ok && (r.status === 404 || r.status === 400)) {
       await admin.from("device_tokens").update({ is_active: false }).eq("token", tk.token);
     }

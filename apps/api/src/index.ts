@@ -2,6 +2,8 @@ import { env, hasServiceRole } from "./config/env.js";
 import app from "./app.js";
 import { seedBootstrapAdmin, seedSmsGateways } from "./lib/seed-admin.js";
 import { applyGrowSchema } from "./lib/apply-grow-schema.js";
+import { ensureVendorSchema } from "./lib/apply-vendor-schema.js";
+import { startLeadExpiryWorker } from "./lib/lead-expiry-worker.js";
 
 export default app;
 
@@ -15,6 +17,10 @@ function bootLocal() {
     applyGrowSchema()
       .then(() => console.log("[grow-schema] ready"))
       .catch((e) => console.warn("[grow-schema]", e));
+    ensureVendorSchema().then(() => {
+      console.log("[vendor-schema] ready");
+      startLeadExpiryWorker();
+    });
   });
 }
 

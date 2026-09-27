@@ -6,6 +6,7 @@ import { hasServiceRole } from "../config/env.js";
 import { NearbyShopsSchema, fetchPublicLanding, getNearbyDigitalShops } from "../lib/shops.js";
 import { requireAuth } from "../middleware/auth.js";
 import { getServiceRoleClient, tryServiceRole } from "../lib/supabase.js";
+import { recordVendorVisit, vendorIdForCode } from "../lib/vendor-visits.js";
 
 export const shopsRouter = Router();
 
@@ -94,6 +95,16 @@ shopsRouter.post(
     if (!parsed.success) return zodFail(res, parsed.error);
     const sb = tryServiceRole() ?? getServiceRoleClient();
     const project = typeof req.query.p === "string" ? req.query.p : typeof req.body?.project === "string" ? req.body.project : null;
+    const vendorId = await vendorIdForCode(code).catch(() => null);
+    if (vendorId) {
+      await recordVendorVisit({
+        vendorId,
+        name: parsed.data.visitor_name,
+        phone: parsed.data.visitor_phone,
+        source: parsed.data.kind === "s" ? "shop" : "qr",
+        code,
+      }).catch((err) => console.warn("[visit]", err instanceof Error ? err.message : err));
+    }
     const { data, error } = await sb
       .from("shop_visits")
       .insert({ code, project_slug: project, ...parsed.data })

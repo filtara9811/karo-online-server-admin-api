@@ -120,7 +120,7 @@ export async function getNearbyOnlineVendors(data: z.infer<typeof NearbyOnlineSc
 
     const { data: vendors, error } = await admin
       .from("vendors")
-      .select("id, user_id, business_name, owner_name, avatar_url, profile_photo_url, cover_image_url, status, is_blocked, is_online, lat, lng, live_lat, live_lng, location_updated_at, operation_mode, service_radius_km")
+      .select("id, user_id, business_name, owner_name, avatar_url, profile_photo_url, cover_image_url, status, is_blocked, is_online, lat, lng, live_lat, live_lng, location_updated_at, operation_mode, service_radius_km, rating_avg, rating_count, trade")
       .eq("is_blocked", false);
 
     if (error) {
@@ -162,6 +162,9 @@ export async function getNearbyOnlineVendors(data: z.infer<typeof NearbyOnlineSc
           lat,
           lng,
           service_radius_km: Number(v.service_radius_km ?? 10),
+          rating: Number(v.rating_avg ?? 0),
+          rating_count: Number(v.rating_count ?? 0),
+          trade: (v.trade ?? null) as string | null,
           km,
         };
       })

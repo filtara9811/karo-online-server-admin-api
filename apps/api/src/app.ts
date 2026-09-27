@@ -18,6 +18,13 @@ import { adminScanRouter, scansRouter } from "./modules/scans.js";
 import { shopsRouter } from "./modules/shops.js";
 import { growRouter } from "./modules/grow.js";
 import { webhooksRouter } from "./modules/webhooks.js";
+import { vendorRouter } from "./modules/vendor.js";
+import { vendorShopRouter } from "./modules/vendor-shop.js";
+import { storeRouter } from "./modules/store.js";
+import { vendorDashboardRouter } from "./modules/vendor-dashboard.js";
+import { mediaRouter } from "./modules/media.js";
+import { chatRouter } from "./modules/chat.js";
+import { visitsRouter } from "./modules/visits.js";
 import { mountStaticSites } from "./lib/static-site.js";
 
 export function createApp() {
@@ -81,6 +88,13 @@ export function createApp() {
   app.use("/v1/scans", scansRouter);
   app.use("/v1/shops", shopsRouter);
   app.use("/v1/grow", growRouter);
+  app.use("/v1/vendor/shop", vendorShopRouter);
+  app.use("/v1/store", storeRouter);
+  app.use("/v1/vendor", vendorDashboardRouter);
+  app.use("/v1/vendor", vendorRouter);
+  app.use("/v1/media", mediaRouter);
+  app.use("/v1/chat", chatRouter);
+  app.use("/v1/visits", visitsRouter);
   app.use("/api/public", webhooksRouter);
 
   mountStaticSites(app);

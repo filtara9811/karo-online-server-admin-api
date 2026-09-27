@@ -24,7 +24,7 @@ export const env = {
   corsOrigin: optional("CORS_ORIGIN", "*"),
   lovableApiKey: optional("LOVABLE_API_KEY"),
   gatewayApiKey: optional("GATEWAYAPI_API_KEY"),
-  publicSiteUrl: optional("PUBLIC_SITE_URL", "https://karoonline.in"),
+  publicSiteUrl: optional("PUBLIC_SITE_URL", "https://karo-online-server-admin-api-api-git-main-ashu-e386.vercel.app"),
   youtubeApiKey: optional("YOUTUBE_API_KEY"),
 };
 

@@ -35,15 +35,15 @@ export const VerifySchema = z.object({
 
 export const FinalizeCustomerSchema = z.object({
   name: z.string().min(2).max(120),
-  gender: z.string().max(40).optional().default(""),
+  gender: z.string().max(40).nullish().transform((v) => v ?? ""),
   phone: z
     .string()
     .min(8)
     .max(20)
     .transform((s) => s.replace(/\D/g, "").slice(-10)),
-  email: z.string().max(160).optional().default(""),
-  address: z.string().max(500).optional().default(""),
-  referral: z.string().max(40).optional().default(""),
+  email: z.string().max(160).nullish().transform((v) => v ?? ""),
+  address: z.string().max(500).nullish().transform((v) => v ?? ""),
+  referral: z.string().max(40).nullish().transform((v) => v ?? ""),
 });
 
 function hash(code: string, phone: string) {
@@ -131,7 +131,7 @@ export async function issuePhoneSession(phone: string) {
     password: authUser.password,
   });
   if (signErr || !signedIn.session) {
-    throw new Error(signErr?.message || "Login session start nahi ho paya");
+    throw new Error(signErr?.message || "Could not start the login session");
   }
   const s = signedIn.session;
   return {
@@ -255,7 +255,7 @@ async function getActiveSmsGateway(): Promise<{ gateway: GatewayRow | null; erro
   if (error) {
     const message = `SMS gateway lookup failed: ${error}`;
     const logged = await logSystem("otp", null, "error", message);
-    return { gateway: null, error: logged ? message : `${message} (log write bhi fail hua)` };
+    return { gateway: null, error: logged ? message : `${message} (the log could not be written either)` };
   }
 
   const active = rows.find((r) => r.is_active) ?? null;
@@ -279,9 +279,9 @@ async function getActiveSmsGateway(): Promise<{ gateway: GatewayRow | null; erro
     gateway: null,
     error:
       (rows.length === 0
-        ? "SMS gateway list khali aayi (server ko gateway table nahi mila)."
-        : "Koi active SMS gateway nahi mila. Admin → SMS Gateways me gateway activate karein.") +
-      (logged ? "" : " Server log write bhi fail hua — server key check karein."),
+        ? "The SMS gateway list is empty (the server could not find the gateway table)."
+        : "No active SMS gateway. Activate one in Admin → SMS Gateways.") +
+      (logged ? "" : " The server log could not be written either. Check the server key."),
   };
 }
 
@@ -349,7 +349,7 @@ async function sendViaFast2SMS(
         return {
           ok: false,
           error:
-            "Fast2SMS Invalid Sender ID: Admin SMS settings me wahi 6-character DLT Header daalein jo Fast2SMS account me approved/active hai.",
+            "Fast2SMS invalid sender ID: in Admin SMS settings, enter the same 6-character DLT header that is approved and active in your Fast2SMS account.",
           raw: json,
         };
       }
@@ -430,7 +430,7 @@ async function sendViaWhatsApp(
   const cfg = (p.config ?? {}) as Record<string, string>;
   const base = (p.api_base_url || "https://graph.facebook.com/v20.0").replace(/\/$/, "");
   const templateName = (cfg.otp_template || p.default_template || "").trim();
-  if (!templateName) return { ok: false, error: "WhatsApp OTP template configure nahi hai (Admin → WhatsApp)." };
+  if (!templateName) return { ok: false, error: "The WhatsApp OTP template is not set up (Admin → WhatsApp)." };
   const lang = (cfg.otp_template_lang || "en_US").trim();
 
   const body = {
@@ -501,7 +501,7 @@ async function deliverOtp(
     return { ok: false, error: wa.error ?? "WhatsApp OTP failed" };
   }
   if (gateway!.is_test_mode) {
-    return { ok: false, error: "SMS Test mode ON hai. Live OTP ke liye Admin SMS settings me Test mode OFF karein." };
+    return { ok: false, error: "SMS test mode is on. Turn it off in Admin SMS settings to send real OTPs." };
   }
   const cfg = asSmsConfig(gateway!.config);
   const sms =
@@ -582,13 +582,13 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
   const { gateway, error: gatewayError } = await getActiveSmsGateway();
   if (!gateway && !waProvider) {
     const { rememberOtp, DEV_OTP, tableMissing } = await import("./memory.js");
-    if (tableMissing({ message: gatewayError ?? "" }) || /khali|not found|schema cache/i.test(gatewayError ?? "")) {
+    if (tableMissing({ message: gatewayError ?? "" }) || /list is empty|not found|schema cache/i.test(gatewayError ?? "")) {
       rememberOtp(phone, DEV_OTP);
       return { ok: true, test_mode: true, seeded: true, otp_code: DEV_OTP, channel: data.channel ?? "sms" };
     }
     return {
       ok: false,
-      error: gatewayError || "No active SMS gateway. Admin → SMS Gateways me ek gateway activate karein.",
+      error: gatewayError || "No active SMS gateway. Activate one in Admin → SMS Gateways.",
     };
   }
   if (wantsWhatsApp && !waProvider && gateway) {
@@ -613,7 +613,7 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
     if (Number.isFinite(lastIssued) && since < 8_000) {
       return {
         ok: false,
-        error: "OTP abhi bheja gaya. Kuch seconds baad Resend OTP dabaiye.",
+        error: "An OTP was just sent. Wait a few seconds, then tap Resend OTP.",
       };
     }
   }
@@ -639,7 +639,7 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
     });
     return {
       ok: false,
-      error: "SMS Test mode ON hai. Live OTP ke liye Admin SMS settings me Test mode OFF karein.",
+      error: "SMS test mode is on. Turn it off in Admin SMS settings to send real OTPs.",
     };
   }
 
@@ -793,10 +793,10 @@ export async function finalizeCustomerRegistration(data: z.infer<typeof Finalize
     .order("verified_at", { ascending: false })
     .limit(1);
   const skipOtpTable = !!otpErr && tableMissing(otpErr);
-  if (otpErr && !skipOtpTable) return { ok: false as const, error: "OTP verify check fail hua" };
+  if (otpErr && !skipOtpTable) return { ok: false as const, error: "Could not check the OTP" };
   if (!skipOtpTable) {
     const verifiedRow = verifiedRows?.[0];
-    if (!verifiedRow) return { ok: false as const, error: "Pehle mobile OTP verify karein" };
+    if (!verifiedRow) return { ok: false as const, error: "Verify your mobile number with the OTP first" };
     const verifiedAt = verifiedRow.verified_at ? new Date(verifiedRow.verified_at).getTime() : 0;
     if (!verifiedAt || Date.now() - verifiedAt > 15 * 60 * 1000) {
       return { ok: false as const, error: "Session expired — please re-verify your OTP" };
@@ -817,7 +817,7 @@ export async function finalizeCustomerRegistration(data: z.infer<typeof Finalize
   try {
     authUser = await ensurePhoneAuthUser(phone);
   } catch (e) {
-    return { ok: false as const, error: (e as Error).message || "Login session create nahi ho paya" };
+    return { ok: false as const, error: (e as Error).message || "Could not create the login session" };
   }
 
   const { error } = await admin.rpc("save_customer_profile_as_user", {
@@ -847,6 +847,6 @@ export async function finalizeCustomerRegistration(data: z.infer<typeof Finalize
     const session = await issuePhoneSession(phone);
     return { ok: true as const, customer_id: authUser.userId, ...session };
   } catch (e) {
-    return { ok: false as const, error: (e as Error).message || "Login session start nahi ho paya" };
+    return { ok: false as const, error: (e as Error).message || "Could not start the login session" };
   }
 }

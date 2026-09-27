@@ -48,7 +48,7 @@ export type ShopFeedFilters = {
   excludeUserId?: string | null;
 };
 
-const SITE = env.publicSiteUrl || "https://karoonline.in";
+const SITE = env.publicSiteUrl.replace(/\/$/, "") || "https://karo-online-server-admin-api-api-git-main-ashu-e386.vercel.app";
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;

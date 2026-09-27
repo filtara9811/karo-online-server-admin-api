@@ -12,7 +12,7 @@ import { listPublicShopFeed } from "../lib/shop-feed.js";
 export const growRouter = Router();
 
 const PROJECT_PRICE_INR = 599;
-const SITE = env.publicSiteUrl || "https://karoonline.in";
+const SITE = env.publicSiteUrl.replace(/\/$/, "") || "https://karo-online-server-admin-api-api-git-main-ashu-e386.vercel.app";
 
 type GrowProject = {
   id: string;
@@ -417,7 +417,7 @@ growRouter.post(
       const { data, error } = await sb.from("qr_projects").insert(row).select("*").maybeSingle();
       if (error || !data) {
         console.error("[projects] insert failed:", error?.message ?? "no row");
-        return fail(res, 500, "Project save nahi ho paya.");
+        return fail(res, 500, "Could not save the project.");
       }
         await sb
           .from("digital_shops")
@@ -857,7 +857,7 @@ growRouter.post(
         const { data, error } = await sb.from("shop_visits").insert(row).select("*").maybeSingle();
         if (error || !data) {
           console.error("[visits] insert failed:", error?.message ?? "no row");
-          return fail(res, 500, "Visitor save nahi ho paya.");
+          return fail(res, 500, "Could not save the visitor.");
         }
         return ok(res, { visit: data }, 201);
       }
@@ -1104,7 +1104,7 @@ growRouter.put(
       const savedRow = Array.isArray(saved.data) ? saved.data[0] : saved.data;
       if (saved.error || !savedRow) {
         console.error("[links] save failed:", saved.error?.message ?? "no row");
-        return fail(res, 500, "Link settings save nahi ho payi.");
+        return fail(res, 500, "Could not save the link settings.");
       }
       const extra = (savedRow as { extra_links?: unknown }).extra_links;
       return ok(res, {
@@ -1135,13 +1135,13 @@ growRouter.get(
     if (!source) return fail(res, 400, "Channel ID / playlist link daalein");
     try {
       const videos = await youtubeFeedFromSource(source);
-      if (!videos.length) return fail(res, 404, "YouTube se videos nahi mili — @handle, UC… ya playlist link check karein");
+      if (!videos.length) return fail(res, 404, "No videos found on YouTube. Check the @handle, channel ID (UC…) or playlist link.");
       return ok(res, { videos });
     } catch (err) {
       console.error("[youtube-feed]", err instanceof Error ? err.message : err);
       const stale = feedCache.get(feedKey(source));
       if (stale?.videos.length) return ok(res, { videos: stale.videos, stale: true });
-      return fail(res, 502, "YouTube sync fail hua — dobara Sync dabayein");
+      return fail(res, 502, "YouTube sync failed. Tap Sync to try again.");
     }
   }),
 );

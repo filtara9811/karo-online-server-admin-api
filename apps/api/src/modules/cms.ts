@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler, fail, ok, zodFail } from "../lib/respond.js";
+import { getPool } from "../lib/pg-client.js";
 import {
   FormSubmitSchema,
   SlugSchema,
@@ -13,6 +14,18 @@ import {
 } from "../lib/cms.js";
 
 export const cmsRouter = Router();
+
+const PUBLIC_SETTINGS = ["welcome_video", "vendor_onboarding_video", "social_links", "auth_bg_video"];
+
+cmsRouter.get(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    const asked = String(req.query.keys ?? "").split(",").map((k) => k.trim()).filter((k) => PUBLIC_SETTINGS.includes(k));
+    const keys = asked.length ? asked : PUBLIC_SETTINGS;
+    const { rows } = await getPool().query(`select key, value from public.app_settings where key = any($1::text[])`, [keys]);
+    return ok(res, { settings: Object.fromEntries(rows.map((r) => [r.key, r.value])) });
+  }),
+);
 
 cmsRouter.get(
   "/site",

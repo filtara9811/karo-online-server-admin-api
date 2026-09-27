@@ -5,6 +5,7 @@ import { env, hasServiceRole } from "../config/env.js";
 import { getServiceRoleClient, tryServiceRole } from "../lib/supabase.js";
 import { sendLeadPushToVendorInternal } from "../lib/push.js";
 import { resolveShopIdentity } from "../lib/shops.js";
+import { acceptLeadForVendor, rejectLeadForVendor } from "../lib/vendor-leads.js";
 import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/respond.js";
 
 export const webhooksRouter = Router();
@@ -74,8 +75,8 @@ async function resolveVendorByPhone(phone: string): Promise<string | null> {
   const last10 = d.slice(-10);
   const { data } = await admin
     .from("vendors")
-    .select("user_id,whatsapp,phone")
-    .or(`whatsapp.ilike.%${last10},phone.ilike.%${last10}`)
+    .select("user_id,whatsapp")
+    .ilike("whatsapp", `%${last10}`)
     .limit(1);
   return data?.[0]?.user_id ?? null;
 }
@@ -99,13 +100,10 @@ async function handleInteractive(msg: Record<string, unknown>, fromPhone: string
   });
   if (!vendorId) return;
   if (parsed.action === "accept") {
-    await admin.rpc("accept_lead_for_vendor", { _lead_id: parsed.leadId, _vendor_id: vendorId });
+    const res = await acceptLeadForVendor(parsed.leadId, vendorId);
+    if (!res.ok) console.warn("[wa] accept failed", parsed.leadId, vendorId, res.reason);
   } else {
-    await admin.rpc("reject_lead_for_vendor", {
-      _lead_id: parsed.leadId,
-      _vendor_id: vendorId,
-      _reason: "rejected_via_whatsapp",
-    });
+    await rejectLeadForVendor(parsed.leadId, vendorId, "rejected_via_whatsapp");
   }
 }
 

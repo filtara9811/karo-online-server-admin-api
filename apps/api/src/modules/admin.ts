@@ -6,6 +6,9 @@ import { parseListQuery } from "../lib/geo.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import { seedSmsGateways } from "../lib/seed-admin.js";
+import { getPool } from "../lib/pg-client.js";
+import { settle } from "../lib/payments.js";
+import { FcmConfigSchema, getFcmStatus, pushToUser, saveFcmConfig } from "../lib/push.js";
 import {
   ADMIN_CRUD_TABLES,
   ApprovalSchema,
@@ -39,6 +42,42 @@ adminRouter.get(
       email: req.authUser?.email ?? null,
       user: req.authUser,
     });
+  }),
+);
+
+adminRouter.get(
+  "/fcm",
+  asyncHandler(async (_req, res) => ok(res, await getFcmStatus())),
+);
+
+adminRouter.put(
+  "/fcm",
+  asyncHandler(async (req, res) => {
+    const parsed = FcmConfigSchema.safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const r = await saveFcmConfig(parsed.data);
+    return r.ok ? ok(res, r) : fail(res, 400, r.error);
+  }),
+);
+
+adminRouter.post(
+  "/fcm/test",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ phone: z.string().trim().regex(/^(\+?91)?\d{10}$/, "Enter a 10-digit mobile number") }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const { rows } = await getPool().query(
+      `select id from public.local_users where right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = $1 limit 1`,
+      [parsed.data.phone.slice(-10)],
+    );
+    if (!rows[0]) return fail(res, 404, "No user with this phone number");
+    const r = await pushToUser({
+      userId: rows[0].id as string,
+      title: "🔔 Test alert from Karo Online",
+      body: "If your phone rang, new-request alerts are working.",
+      highPriority: true,
+      extraData: { kind: "direct_test" },
+    });
+    return ok(res, r);
   }),
 );
 
@@ -371,5 +410,42 @@ adminRouter.delete(
       return fail(res, 400, error.message);
     }
     return ok(res, { deleted: id });
+  }),
+);
+
+adminRouter.get(
+  "/wallet-requests",
+  asyncHandler(async (req, res) => {
+    const status = z.enum(["pending", "success", "failed", "all"]).catch("pending").parse(req.query.status);
+    const { rows } = await getPool().query(
+      `select t.*, v.business_name, v.owner_name, v.whatsapp
+         from public.wallet_transactions t left join public.vendors v on v.user_id = t.vendor_id
+        where t.kind = 'credit' and ($1 = 'all' or t.status = $1)
+        order by t.created_at desc limit 300`,
+      [status],
+    );
+    return ok(res, { requests: rows });
+  }),
+);
+
+adminRouter.post(
+  "/wallet-requests/:id/:action",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const action = z.enum(["approve", "reject"]).safeParse(req.params.action);
+    if (!id.success || !action.success) return fail(res, 400, "Invalid request");
+    const note = z.string().max(300).optional().catch(undefined).parse(req.body?.note);
+    if (action.data === "approve") {
+      const r = await settle({ id: id.data }, null, { approved_by: req.userId, note: note ?? null });
+      return r.ok ? ok(res, r) : fail(res, 400, r.error);
+    }
+    const { rows } = await getPool().query(
+      `update public.wallet_transactions
+          set status = 'failed', metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb
+        where id = $1 and kind = 'credit' and status = 'pending' returning id`,
+      [id.data, JSON.stringify({ rejected_by: req.userId, note: note ?? null })],
+    );
+    if (!rows[0]) return fail(res, 409, "Request is not pending");
+    return ok(res, { rejected: id.data });
   }),
 );

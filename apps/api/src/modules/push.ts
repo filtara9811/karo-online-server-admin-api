@@ -3,7 +3,8 @@ import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/resp
 import { z } from "zod";
 import { hasServiceRole } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
-import { tryServiceRole } from "../lib/supabase.js";
+import { getPool } from "../lib/pg-client.js";
+import { withTx } from "../lib/shop.js";
 import {
   LeadPushSchema,
   StatusPushSchema,
@@ -21,16 +22,30 @@ pushRouter.post(
   asyncHandler(async (req, res) => {
     const parsed = z.object({ token: z.string().min(8).max(4096), platform: z.string().max(20).optional() }).safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const sb = tryServiceRole();
-    if (!sb) return ok(res, { registered: false, seeded: true });
-    const { error } = await sb.from("device_tokens").insert({
-      user_id: req.userId,
-      token: parsed.data.token,
-      platform: parsed.data.platform ?? "android",
-      is_active: true,
+    const { token } = parsed.data;
+    const platform = parsed.data.platform ?? "android";
+    await withTx(async (c) => {
+      await c.query(`select pg_advisory_xact_lock(hashtext($1))`, [token]);
+      await c.query(`delete from public.device_tokens where token = $1 and user_id <> $2`, [token, req.userId]);
+      const { rows } = await c.query(`select id from public.device_tokens where token = $1 and user_id = $2 order by created_at`, [token, req.userId]);
+      if (rows.length) {
+        await c.query(`update public.device_tokens set is_active = true, platform = $2 where id = $1`, [rows[0].id, platform]);
+        if (rows.length > 1) await c.query(`delete from public.device_tokens where id = any($1::uuid[])`, [rows.slice(1).map((r) => r.id)]);
+      } else {
+        await c.query(`insert into public.device_tokens (user_id, token, platform, is_active) values ($1, $2, $3, true)`, [req.userId, token, platform]);
+      }
     });
-    if (error && !/duplicate|unique/i.test(error.message)) return fail(res, 400, error.message);
     return ok(res, { registered: true });
+  }),
+);
+
+pushRouter.post(
+  "/unregister",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ token: z.string().min(8).max(4096) }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    await getPool().query(`delete from public.device_tokens where token = $1 and user_id = $2`, [parsed.data.token, req.userId]);
+    return ok(res, { unregistered: true });
   }),
 );
 
