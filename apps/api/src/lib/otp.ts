@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomInt } from "crypto";
 import { z } from "zod";
 import { createAnonClient, getServiceRoleClient, tryServiceRole } from "./supabase.js";
 import { asJson } from "./geo.js";
+import { hasDatabase } from "./pg-client.js";
 
 function dbClient() {
   return tryServiceRole() ?? createAnonClient();
@@ -582,7 +583,8 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
   const { gateway, error: gatewayError } = await getActiveSmsGateway();
   if (!gateway && !waProvider) {
     const { rememberOtp, DEV_OTP, tableMissing } = await import("./memory.js");
-    if (tableMissing({ message: gatewayError ?? "" }) || /list is empty|not found|schema cache/i.test(gatewayError ?? "")) {
+    // A dev OTP in the response would let anyone sign in as any phone, so it only exists without a real database.
+    if (!hasDatabase() && (tableMissing({ message: gatewayError ?? "" }) || /list is empty|not found|schema cache/i.test(gatewayError ?? ""))) {
       rememberOtp(phone, DEV_OTP);
       return { ok: true, test_mode: true, seeded: true, otp_code: DEV_OTP, channel: data.channel ?? "sms" };
     }
@@ -696,7 +698,7 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
   } catch (e) {
     const { rememberOtp, DEV_OTP, tableMissing } = await import("./memory.js");
     const msg = e instanceof Error ? e.message : String(e);
-    if (tableMissing({ message: msg }) || /schema cache|does not exist/i.test(msg)) {
+    if (!hasDatabase() && (tableMissing({ message: msg }) || /schema cache|does not exist/i.test(msg))) {
       rememberOtp(phone, DEV_OTP);
       return { ok: true, test_mode: true, seeded: true, otp_code: DEV_OTP, channel: data.channel ?? "sms" };
     }
@@ -707,7 +709,7 @@ export async function sendOtp(data: z.infer<typeof SendOtpSchema>) {
 export async function verifyOtp(data: z.infer<typeof VerifySchema>) {
   const phone = data.phone;
   const code = data.code;
-  const { checkMemOtp, tableMissing, DEV_OTP } = await import("./memory.js");
+  const { checkMemOtp, DEV_OTP } = await import("./memory.js");
   const admin = tryServiceRole();
   if (!admin) {
     if (code !== DEV_OTP && !checkMemOtp(phone, code)) {
@@ -736,21 +738,11 @@ export async function verifyOtp(data: z.infer<typeof VerifySchema>) {
     .order("created_at", { ascending: false })
     .limit(1);
   if (error) {
-    if (tableMissing(error) || !checkMemOtp(phone, code)) {
-      if (code !== "1234" && !checkMemOtp(phone, code)) return { ok: false as const, error: "Wrong OTP" };
-      const session = await issuePhoneSession(phone);
-      return { ok: true as const, test_mode: true, seeded: true, ...session };
-    }
-    return { ok: false as const, error: "Verify lookup failed" };
+    await logSystem("otp", "verify", "error", `OTP lookup failed: ${error.message}`, { phone_last4: phone.slice(-4) });
+    return { ok: false as const, error: "Could not verify the OTP. Try again." };
   }
   const row = rows?.[0];
-  if (!row) {
-    if (code === "1234" || checkMemOtp(phone, code)) {
-      const session = await issuePhoneSession(phone);
-      return { ok: true as const, test_mode: true, seeded: true, ...session };
-    }
-    return { ok: false as const, error: "No active OTP — request a new one" };
-  }
+  if (!row) return { ok: false as const, error: "No active OTP — request a new one" };
 
   if (new Date(row.expires_at).getTime() < Date.now()) {
     return { ok: false as const, error: "OTP expired — request a new one" };
@@ -775,9 +767,8 @@ export async function verifyOtp(data: z.infer<typeof VerifySchema>) {
   const session = await issuePhoneSession(phone);
   return { ok: true as const, test_mode: false, ...session };
   } catch (e) {
-    if (code !== "1234" && !checkMemOtp(phone, code)) return { ok: false as const, error: "Wrong OTP" };
-    const session = await issuePhoneSession(phone);
-    return { ok: true as const, test_mode: true, seeded: true, ...session };
+    console.error("[otp] verify failed:", e instanceof Error ? e.message : e);
+    return { ok: false as const, error: "Could not verify the OTP. Try again." };
   }
 }
 

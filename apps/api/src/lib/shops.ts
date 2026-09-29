@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { getServiceRoleClient, createAnonClient } from "./supabase.js";
+import { getServiceRoleClient } from "./supabase.js";
+import { getPool } from "./pg-client.js";
 import { kmBetween } from "./geo.js";
 
 export const NearbyShopsSchema = z.object({
@@ -87,77 +88,79 @@ export async function getNearbyDigitalShops(data: z.infer<typeof NearbyShopsSche
   return { ok: true as const, shops };
 }
 
+type ProjectRow = Record<string, any>;
+
+/** The One QR project behind a public code: `?p=` wins when it belongs to the code, then a project slug, then the owner's oldest project. */
+export async function resolveLandingProject(code: string, project?: string | null): Promise<ProjectRow | null> {
+  const pool = getPool();
+  const c = code.trim();
+  if (!c) return null;
+  if (project) {
+    const { rows } = await pool.query(
+      `select * from public.qr_projects where (slug = $1 or id::text = $1) and (lower(share_code) = lower($2) or slug = $2) limit 1`,
+      [project, c],
+    );
+    if (rows[0]) return rows[0];
+  }
+  const bySlug = await pool.query(`select * from public.qr_projects where slug = $1 limit 1`, [c]);
+  if (bySlug.rows[0]) return bySlug.rows[0];
+  const byShare = await pool.query(`select * from public.qr_projects where lower(share_code) = lower($1) order by created_at asc limit 1`, [c]);
+  if (byShare.rows[0]) return byShare.rows[0];
+  const byShop = await pool.query(
+    `select p.* from public.digital_shops s join public.qr_projects p on p.id = s.project_id where lower(s.slug) = lower($1) limit 1`,
+    [c],
+  );
+  return byShop.rows[0] ?? null;
+}
+
+const prettyCode = (code: string) => code.replace(/[-_]+/g, " ").replace(/\b\w/g, (x) => x.toUpperCase()) || code;
+
 export async function fetchPublicLanding(code: string, project?: string | null, kind = "q") {
-  const { publicLanding, tableMissing } = await import("./memory.js");
-  const seeded = { ...publicLanding(kind, code), project: project ?? null };
-  try {
-    const admin = getServiceRoleClient();
-    let proj: Record<string, unknown> | null = null;
-    if (project) {
-      const bySlug = await admin.from("qr_projects").select("*").eq("slug", project).maybeSingle();
-      proj = bySlug.data ?? null;
-      if (!proj) {
-        const byId = await admin.from("qr_projects").select("*").eq("id", project).maybeSingle();
-        proj = byId.data ?? null;
-      }
-    }
-    if (!proj) {
-      const byShare = await admin.from("qr_projects").select("*").eq("share_code", code).maybeSingle();
-      proj = byShare.data ?? null;
-    }
-    if (!proj) {
-      const byShop = await admin.from("digital_shops").select("*").eq("slug", code).maybeSingle();
-      if (byShop.data?.project_id) {
-        const p = await admin.from("qr_projects").select("*").eq("id", byShop.data.project_id).maybeSingle();
-        proj = p.data ?? null;
-      }
-    }
-    const identity = await resolveShopIdentity(code, project ?? null);
-    let products: unknown[] = seeded.products as unknown[];
-    if (proj?.id) {
-      const items = await admin.from("shop_products").select("*").eq("project_id", proj.id).eq("is_active", true);
-      if (!items.error && items.data?.length) products = items.data;
-    }
-    const name =
-      (typeof proj?.business_name === "string" && proj.business_name) ||
-      (typeof proj?.title === "string" && proj.title) ||
-      identity.name ||
-      seeded.name;
-    return {
-      ok: true,
-      kind,
-      code,
-      project: project ?? (typeof proj?.slug === "string" ? proj.slug : null),
-      name,
-      title: name,
-      description: (proj?.description as string | undefined) ?? seeded.description,
-      phone: (proj?.contact_phone as string | undefined) ?? seeded.phone,
-      whatsapp: (proj?.contact_phone as string | undefined) ?? seeded.whatsapp,
-      trade: (proj?.category as string | undefined) ?? identity.name ?? seeded.trade,
-      accent: (proj?.accent_color as string | undefined) ?? identity.accent,
-      theme_key: proj?.theme_key ?? null,
-      is_online: true,
-      products,
-      stats: { views: seeded.stats?.views ?? 1, products: products.length, rating: 4.8 },
-      visit_count: seeded.visit_count ?? 1,
-    };
-  } catch {
-    /* fall through */
-  }
-  const client = createAnonClient();
-  const { data, error } = await client.rpc("get_public_landing", {
-    _code: code,
-    _project: project ?? undefined,
-  });
-  if (error) {
-    if (tableMissing(error)) return seeded;
-    return { ok: false, error: error.message };
-  }
-  const row = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
-  if (row.ok === false) return { ok: false, error: typeof row.error === "string" ? row.error : "not found" };
-  const name = typeof row.name === "string" && row.name ? row.name : seeded.name;
-  const products = Array.isArray(row.products) && row.products.length ? row.products : seeded.products;
-  return { ...seeded, ...row, ok: true, name, products, project: project ?? seeded.project ?? null };
+  const pool = getPool();
+  const proj = await resolveLandingProject(code, project);
+  const identity = await resolveShopIdentity(code, proj?.slug ?? project ?? null);
+  const products = proj
+    ? (
+        await pool.query(
+          `select id, name, price, category, stock, image_url from public.shop_products
+            where project_id = $1 and coalesce(is_active, true) order by sort_order nulls last, created_at desc`,
+          [proj.id],
+        )
+      ).rows.map((p) => ({ ...p, price: Number(p.price ?? 0), stock: Number(p.stock ?? 0) }))
+    : [];
+  const views = proj
+    ? await pool.query(
+        `select count(*)::int n from public.shop_visits
+          where project_id = $1 or project_slug = $2 or (project_id is null and project_slug is null and code in ($2, $3))`,
+        [proj.id, proj.slug, proj.share_code ?? proj.slug],
+      )
+    : await pool.query(`select count(*)::int n from public.shop_visits where code = $1`, [code]);
+  const visitCount = Number(views.rows[0]?.n ?? 0);
+  const name = proj?.business_name || proj?.title || identity.name || prettyCode(code);
+  const phone = proj?.contact_phone ? String(proj.contact_phone) : null;
+  return {
+    ok: true as const,
+    kind,
+    code,
+    project: proj?.slug ?? project ?? null,
+    project_id: proj?.id ?? null,
+    linked: Boolean(proj || identity.name),
+    name,
+    title: name,
+    description: proj?.description ?? null,
+    phone,
+    whatsapp: phone,
+    trade: proj?.category ?? proj?.trade_type ?? null,
+    city: proj?.city ?? null,
+    accent: proj?.accent_color ?? identity.accent,
+    theme_key: proj?.theme_key ?? null,
+    avatar_url: proj?.avatar_url ?? identity.icon ?? null,
+    cover_image_url: proj?.cover_image_url ?? null,
+    is_online: true,
+    products,
+    stats: { views: visitCount, products: products.length },
+    visit_count: visitCount,
+  };
 }
 
 export type ShopIdentity = {

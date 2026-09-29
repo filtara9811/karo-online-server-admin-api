@@ -4,8 +4,11 @@ import { z } from "zod";
 import { ensureVendorSchema } from "./apply-vendor-schema.js";
 import { getPool } from "./pg-client.js";
 
-export type Purpose = "wallet_recharge" | "coin_purchase";
+export type Purpose = "wallet_recharge" | "coin_purchase" | "qr_project";
 export type Provider = "razorpay" | "cashfree";
+
+/** Gateways are configured for wallet or coin use; project purchases ride on the wallet gateway. */
+const gatewayPurpose = (p?: Purpose) => (p === "qr_project" ? "wallet_recharge" : p);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -30,7 +33,7 @@ export async function razorpayConfig(purpose?: Purpose): Promise<RazorpayCfg | n
     `select public_key, config, is_test_mode from public.payment_gateways
       where provider = 'razorpay' and is_active and ($1::text is null or purpose in ($1, 'both'))
       order by priority nulls last limit 1`,
-    [purpose ?? null],
+    [gatewayPurpose(purpose) ?? null],
   );
   const g = rows[0];
   const secret = String(g?.config?.secret_key ?? "").trim();
@@ -52,7 +55,7 @@ export async function cashfreeConfig(purpose?: Purpose): Promise<CashfreeCfg | n
     `select public_key, config, is_test_mode from public.payment_gateways
       where provider = 'cashfree' and is_active and ($1::text is null or purpose in ($1, 'both'))
       order by priority nulls last limit 1`,
-    [purpose ?? null],
+    [gatewayPurpose(purpose) ?? null],
   );
   const g = legacy.rows[0];
   const secret = String(g?.config?.secret_key ?? "").trim();
@@ -63,7 +66,7 @@ export async function cashfreeConfig(purpose?: Purpose): Promise<CashfreeCfg | n
 /** Service wallet prefers Razorpay and coins prefer Cashfree, like the website; falls back to whichever is set up. */
 export async function pickProvider(purpose: Purpose): Promise<Provider | null> {
   const [rzp, cf] = await Promise.all([razorpayConfig(purpose), cashfreeConfig(purpose)]);
-  const order: Provider[] = purpose === "wallet_recharge" ? ["razorpay", "cashfree"] : ["cashfree", "razorpay"];
+  const order: Provider[] = gatewayPurpose(purpose) === "wallet_recharge" ? ["razorpay", "cashfree"] : ["cashfree", "razorpay"];
   return order.find((p) => (p === "razorpay" ? rzp : cf)) ?? null;
 }
 
@@ -85,7 +88,8 @@ export const OrderSchema = z.object({
   coins: z.number().int().min(1).max(100000).optional(),
   amount_inr: z.number().min(1).max(500000).optional(),
 });
-type OrderInput = z.infer<typeof OrderSchema>;
+type ProjectOrderInput = { purpose: "qr_project"; project_id: string; provider?: Provider };
+type OrderInput = z.infer<typeof OrderSchema> | ProjectOrderInput;
 
 export type Quote = {
   purpose: Purpose;
@@ -97,11 +101,38 @@ export type Quote = {
   coins: number;
   credit_inr: number;
   pack_id: string | null;
+  project_id?: string;
 };
 
-export async function quote(input: OrderInput): Promise<Quote | { error: string }> {
+export async function quote(input: OrderInput, userId?: string): Promise<Quote | { error: string }> {
   await ensureVendorSchema();
   const pool = getPool();
+  if (input.purpose === "qr_project") {
+    if (!userId) return { error: "Sign in to unlock this project" };
+    const { rows } = await pool.query(
+      `select p.id, p.title, p.business_name, p.price_inr,
+              p.is_paid or not exists (select 1 from public.qr_projects o where o.user_id = p.user_id and o.created_at < p.created_at) as is_paid
+         from public.qr_projects p where p.id = $1 and p.user_id = $2`,
+      [input.project_id, userId],
+    );
+    const p = rows[0];
+    if (!p) return { error: "Project not found" };
+    if (p.is_paid) return { error: "This project is already unlocked" };
+    const amt = Number(p.price_inr ?? 0);
+    if (amt < 1) return { error: "This project is free" };
+    return {
+      purpose: "qr_project",
+      label: `One QR project · ${p.business_name || p.title || "Shop"}`,
+      base_inr: amt,
+      gst_percent: 0,
+      gst_inr: 0,
+      amount_inr: amt,
+      coins: 0,
+      credit_inr: 0,
+      pack_id: null,
+      project_id: p.id,
+    };
+  }
   if (input.purpose === "coin_purchase") {
     const { rows: cfgRows } = await pool.query(
       `select coin_rate_inr, min_purchase_coins, max_purchase_coins, gst_percent from public.coin_pricing_config
@@ -151,20 +182,20 @@ async function insertPending(userId: string, provider: Provider, ref: string, q:
      values ($1, $1, $2, 'credit', $3, $4, $5, 'credit', $6, $7, $8, 'pending', $9::jsonb)`,
     [
       userId,
-      q.purpose === "coin_purchase" ? q.amount_inr : q.credit_inr,
-      q.purpose === "coin_purchase" ? "leadx_purchase" : "wallet_recharge",
+      q.purpose === "wallet_recharge" ? q.credit_inr : q.amount_inr,
+      q.purpose === "coin_purchase" ? "leadx_purchase" : q.purpose,
       provider,
       ref,
       q.coins || null,
       `${q.label} (pending)`,
-      q.purpose === "coin_purchase" ? "leadx" : "service",
+      q.purpose === "coin_purchase" ? "leadx" : q.purpose === "qr_project" ? "qr_project" : "service",
       JSON.stringify({ quote: q }),
     ],
   );
 }
 
 export async function createOrder(userId: string, input: OrderInput, appOrigin: string) {
-  const q = await quote(input);
+  const q = await quote(input, userId);
   if ("error" in q) return { ok: false as const, error: q.error };
   const provider = input.provider ?? (await pickProvider(q.purpose));
   if (!provider) {
@@ -206,7 +237,7 @@ export async function createOrder(userId: string, input: OrderInput, appOrigin: 
   if (!cfg) return { ok: false as const, error: "Cashfree is not set up", no_gateway: true };
   const { rows: vr } = await getPool().query(`select owner_name, email, whatsapp from public.vendors where user_id = $1`, [userId]);
   const v = vr[0] ?? {};
-  const orderId = `KO_${q.purpose === "coin_purchase" ? "COIN" : "WAL"}_${Date.now()}_${userId.slice(0, 6)}`;
+  const orderId = `KO_${q.purpose === "coin_purchase" ? "COIN" : q.purpose === "qr_project" ? "QR" : "WAL"}_${Date.now()}_${userId.slice(0, 6)}`;
   try {
     const r = await fetch(`${cfBase(cfg.test)}/orders`, {
       method: "POST",
@@ -277,6 +308,26 @@ export async function settle(
       return { ok: false as const, error: "Paid amount does not match the order" };
     }
     const vendorId = t.vendor_id as string;
+    if (t.wallet_kind === "qr_project") {
+      const project = await client.query(
+        `update public.qr_projects set is_paid = true, price_inr = $3 where id = $1 and user_id = $2 returning id`,
+        [q.project_id ?? null, vendorId, Number(q.amount_inr ?? t.amount_inr ?? 0)],
+      );
+      await client.query(
+        `update public.wallet_transactions set status = $2, description = $3, metadata = metadata || $4::jsonb where id = $1`,
+        [
+          t.id,
+          project.rows[0] ? "success" : "failed",
+          String(t.description ?? "").replace(/ \(pending\)$/, ""),
+          JSON.stringify(project.rows[0] ? extra : { ...extra, failure: "project deleted before payment settled" }),
+        ],
+      );
+      await client.query("commit");
+      await logSystem(provider, project.rows[0] ? "success" : "error", `QR project ${project.rows[0] ? "unlocked" : "missing"} for ${ref}`, { vendorId, project: q.project_id });
+      return project.rows[0]
+        ? { ok: true as const, credited_coins: 0, credited_inr: 0, project_id: q.project_id }
+        : { ok: false as const, error: "This project was deleted. Contact support for a refund." };
+    }
     await client.query(`insert into public.vendor_wallets (vendor_id) values ($1) on conflict (vendor_id) do nothing`, [vendorId]);
     let wallet;
     if (t.wallet_kind === "leadx") {

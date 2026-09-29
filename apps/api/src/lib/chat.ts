@@ -136,7 +136,8 @@ async function notifyPeer(ctx: ChatContext, preview: string) {
     title: toVendor ? `💬 ${name}` : `💬 ${name} · ${ctx.lead.sub_category_name ?? "Your request"}`,
     body: preview.slice(0, 180),
     actionUrl: toVendor ? `/vendor/chat/${ctx.lead.id}` : `/chat/${ctx.lead.id}?peer=${ctx.me}`,
-    highPriority: true,
+    channel: "message",
+    tag: `chat_${ctx.lead.id}_${ctx.me}`,
     extraData: { kind: "chat", lead_id: ctx.lead.id, peer_id: ctx.me, role: toVendor ? "vendor" : "customer" },
   });
 }

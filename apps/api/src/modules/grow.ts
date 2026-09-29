@@ -1,87 +1,30 @@
-import { randomUUID } from "crypto";
+import type { Request, Response } from "express";
 import { Router } from "express";
 import { z } from "zod";
 import { asyncHandler, fail, ok, zodFail } from "../lib/respond.js";
 import { readBearer, requireAuth } from "../middleware/auth.js";
-import { createUserClient, getServiceRoleClient, tryServiceRole } from "../lib/supabase.js";
-import { hasDatabase } from "../config/env.js";
-import { pickService, createCashfreeOrder } from "../lib/cashfree.js";
+import { createUserClient } from "../lib/supabase.js";
+import { getPool, hasDatabase } from "../lib/pg-client.js";
+import { createOrder } from "../lib/payments.js";
 import { env } from "../config/env.js";
 import { listPublicShopFeed } from "../lib/shop-feed.js";
+import { feedCache, feedKey, youtubeFeedFromSource } from "../lib/youtube-feed.js";
 
 export const growRouter = Router();
 
 const PROJECT_PRICE_INR = 599;
 const SITE = env.publicSiteUrl.replace(/\/$/, "") || "https://karo-online-server-admin-api-api-git-main-ashu-e386.vercel.app";
 
-type GrowProject = {
-  id: string;
-  user_id: string;
-  title: string;
-  name?: string | null;
-  slug: string;
-  business_name?: string | null;
-  contact_phone?: string | null;
-  category?: string | null;
-  city?: string | null;
-  trade_type?: string | null;
-  theme_key?: string | null;
-  accent_color?: string | null;
-  description?: string | null;
-  is_paid: boolean;
-  price_inr: number;
-  ads_enabled?: boolean;
-  ad_budget_inr?: number;
-  share_code?: string | null;
-  shop_url?: string;
-  qr_url?: string;
-  created_at: string;
-};
+type Row = Record<string, any>;
 
-type ShopProduct = {
-  id: string;
-  project_id: string;
-  user_id: string;
-  name: string;
-  price: number;
-  category?: string | null;
-  stock: number;
-  is_active: boolean;
-  created_at: string;
-};
+const q = (sql: string, params: unknown[] = []) => getPool().query(sql, params) as Promise<{ rows: Row[]; rowCount: number | null }>;
 
-type ShopOrder = {
-  id: string;
-  project_id: string | null;
-  user_id?: string | null;
-  code: string;
-  visitor_name?: string | null;
-  visitor_phone?: string | null;
-  items: unknown[];
-  total_inr: number;
-  status: string;
-  created_at: string;
-};
+growRouter.use((_req, res, next) => {
+  if (!hasDatabase()) return fail(res, 503, "DATABASE_URL missing — DigitalOcean Postgres is required");
+  next();
+});
 
-type Campaign = {
-  id: string;
-  project_id: string;
-  user_id: string;
-  title: string;
-  budget_inr: number;
-  clicks: number;
-  status: string;
-  created_at: string;
-};
-
-const memProjects: GrowProject[] = [];
-const memProducts: ShopProduct[] = [];
-const memOrders: ShopOrder[] = [];
-const memCampaigns: Campaign[] = [];
-const memJoins: { id: string; program_id: string; user_id: string }[] = [];
-const memLinks = new Map<string, Record<string, unknown>>();
-
-function defaultLinkSettings(): Record<string, unknown> {
+function defaultLinkSettings(): Row {
   return {
     play_store_enabled: true,
     payment_enabled: false,
@@ -119,219 +62,6 @@ function jsonValue(v: unknown, fallback: unknown) {
   return v ?? fallback;
 }
 
-type YtThumb = { id: string; title: string; thumbnail: string };
-
-function ytThumb(id: string, title?: string | null): YtThumb {
-  return { id, title: title || "YouTube video", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
-}
-
-const YT_HEADERS = {
-  "user-agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "accept-language": "en-IN,en;q=0.9",
-};
-
-const INVIDIOUS = ["https://inv.nadeko.net", "https://yewtu.be", "https://invidious.nerdvpn.de"];
-const feedCache = new Map<string, { at: number; videos: YtThumb[] }>();
-const handleCache = new Map<string, string>();
-const FEED_TTL_MS = 30 * 60 * 1000;
-
-function feedKey(source: string) {
-  return source.trim().toLowerCase().replace(/^@+/, "@");
-}
-
-async function fetchText(url: string, ms = 7000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const r = await fetch(url, { headers: YT_HEADERS, redirect: "follow", signal: ctrl.signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.text();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchTextQuiet(url: string, ms = 7000) {
-  try {
-    return await fetchText(url, ms);
-  } catch {
-    return "";
-  }
-}
-
-function channelIdFromHtml(html: string) {
-  return (
-    /"browseId":"(UC[\w-]{20,})"/i.exec(html)?.[1] ??
-    /"externalId":"(UC[\w-]{20,})"/i.exec(html)?.[1] ??
-    /"channelId":"(UC[\w-]{20,})"/i.exec(html)?.[1] ??
-    /youtube\.com\/channel\/(UC[\w-]{20,})/i.exec(html)?.[1] ??
-    null
-  );
-}
-
-function parseRss(xml: string): YtThumb[] {
-  const out: YtThumb[] = [];
-  const re = /<yt:videoId>([^<]+)<\/yt:videoId>[\s\S]*?<media:title>([^<]*)<\/media:title>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) && out.length < 25) {
-    out.push({ id: m[1], title: m[2] || "YouTube video", thumbnail: `https://img.youtube.com/vi/${m[1]}/hqdefault.jpg` });
-  }
-  if (!out.length) {
-    for (const id of [...xml.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>/g)].map((x) => x[1]).slice(0, 25)) {
-      out.push({ id, title: "YouTube video", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
-    }
-  }
-  return out;
-}
-
-async function videosFromRss(feed: string) {
-  const xml = await fetchTextQuiet(feed);
-  return xml ? parseRss(xml) : [];
-}
-
-function videosFromHtml(html: string): YtThumb[] {
-  const seen = new Set<string>();
-  const out: YtThumb[] = [];
-  for (const m of html.matchAll(/"videoId":"([\w-]{11})"/g)) {
-    const id = m[1];
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const title = new RegExp(`"videoId":"${id}"[\\s\\S]{0,400}?"title":\\{"runs":\\[\\{"text":"([^"]+)"`).exec(html)?.[1];
-    out.push({ id, title: title || "YouTube video", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
-    if (out.length >= 25) break;
-  }
-  return out;
-}
-
-async function videosFromInvidious(idOrHandle: string): Promise<YtThumb[]> {
-  const id = encodeURIComponent(idOrHandle.replace(/^@+/, ""));
-  for (const base of INVIDIOUS) {
-    for (const path of [`/api/v1/channels/${id}/latest`, `/api/v1/channels/${id}/videos`]) {
-      try {
-        const r = await fetch(`${base}${path}`, {
-          headers: { accept: "application/json" },
-          signal: AbortSignal.timeout(7000),
-        });
-        if (!r.ok) continue;
-        const data = (await r.json()) as { videos?: Array<{ videoId?: string; title?: string }> } | Array<{ videoId?: string; title?: string }>;
-        const rows = Array.isArray(data) ? data : data.videos ?? [];
-        const videos = rows
-          .flatMap((v) => (v.videoId ? [ytThumb(v.videoId, v.title)] : []))
-          .slice(0, 25);
-        if (videos.length) return videos;
-      } catch {
-        /* next host */
-      }
-    }
-  }
-  return [];
-}
-
-async function videosFromApi(channelId: string): Promise<YtThumb[]> {
-  const key = env.youtubeApiKey;
-  if (!key) return [];
-  const uploads = channelId.startsWith("UC") ? `UU${channelId.slice(2)}` : channelId;
-  const qs = new URLSearchParams({
-    part: "snippet,contentDetails",
-    playlistId: uploads,
-    maxResults: "25",
-    key,
-  });
-  const r = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${qs}`, { signal: AbortSignal.timeout(8000) });
-  if (!r.ok) return [];
-  const j = (await r.json()) as { items?: Array<{ contentDetails?: { videoId?: string }; snippet?: { title?: string; resourceId?: { videoId?: string } } }> };
-  return (j.items ?? []).flatMap((it) => {
-    const id = it.contentDetails?.videoId ?? it.snippet?.resourceId?.videoId;
-    return id ? [ytThumb(id, it.snippet?.title)] : [];
-  });
-}
-
-async function resolveHandle(handle: string): Promise<string | null> {
-  const h = handle.replace(/^@+/, "").trim();
-  if (!h) return null;
-  const cached = handleCache.get(h.toLowerCase());
-  if (cached) return cached;
-  if (env.youtubeApiKey) {
-    try {
-      const qs = new URLSearchParams({ part: "id", forHandle: `@${h}`, key: env.youtubeApiKey });
-      const r = await fetch(`https://www.googleapis.com/youtube/v3/channels?${qs}`, { signal: AbortSignal.timeout(8000) });
-      const j = (await r.json()) as { items?: Array<{ id?: string }> };
-      if (j.items?.[0]?.id?.startsWith("UC")) {
-        handleCache.set(h.toLowerCase(), j.items[0].id!);
-        return j.items[0].id!;
-      }
-    } catch {
-      /* scrape next */
-    }
-  }
-  for (const url of [`https://www.youtube.com/@${h}`, `https://www.youtube.com/@${h}/videos`, `https://www.youtube.com/@${h}/about`]) {
-    const id = channelIdFromHtml(await fetchTextQuiet(url));
-    if (id) {
-      handleCache.set(h.toLowerCase(), id);
-      return id;
-    }
-  }
-  for (const base of INVIDIOUS) {
-    try {
-      const r = await fetch(`${base}/api/v1/channels/${encodeURIComponent(h)}`, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(6000),
-      });
-      if (!r.ok) continue;
-      const data = (await r.json()) as { authorId?: string };
-      if (data.authorId?.startsWith("UC")) {
-        handleCache.set(h.toLowerCase(), data.authorId);
-        return data.authorId;
-      }
-    } catch {
-      /* next */
-    }
-  }
-  return null;
-}
-
-async function youtubeFeedFromSource(source: string): Promise<YtThumb[]> {
-  const s = source.trim();
-  if (!s) return [];
-  const cached = feedCache.get(feedKey(s));
-  if (cached && Date.now() - cached.at < FEED_TTL_MS) return cached.videos;
-
-  const watch = /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([\w-]{6,})/i.exec(s)?.[1];
-  if (watch && !/list=|@|UC[\w-]{20,}|channel\//i.test(s)) {
-    return [{ id: watch, title: "YouTube video", thumbnail: `https://img.youtube.com/vi/${watch}/hqdefault.jpg` }];
-  }
-  const playlist = /(?:[?&]list=|playlist_id=)([\w-]+)/i.exec(s)?.[1] ?? (/^PL[\w-]+$/i.test(s) ? s : null);
-  const channel = /(?:channel\/|channel_id=)(UC[\w-]+)/i.exec(s)?.[1] ?? (/^UC[\w-]{20,}$/.test(s) ? s : null);
-  const handle =
-    /youtube\.com\/@([^/?#]+)/i.exec(s)?.[1] ??
-    (s.startsWith("@") ? s.slice(1) : /^[\w.]{3,32}$/.test(s) && !s.startsWith("UC") ? s : null);
-  if (playlist) {
-    const videos = await videosFromRss(`https://www.youtube.com/feeds/videos.xml?playlist_id=${encodeURIComponent(playlist)}`);
-    return videos.length ? videos : videosFromInvidious(playlist);
-  }
-  let channelId = channel;
-  if (!channelId && handle) channelId = await resolveHandle(handle);
-  const lookups = [
-    channelId ? () => videosFromApi(channelId!) : null,
-    channelId ? () => videosFromRss(`https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId!)}`) : null,
-    handle ? () => videosFromRss(`https://www.youtube.com/feeds/videos.xml?user=${encodeURIComponent(handle)}`) : null,
-    channelId ? () => videosFromInvidious(channelId!) : null,
-    handle ? () => videosFromInvidious(handle) : null,
-    handle ? async () => videosFromHtml(await fetchTextQuiet(`https://www.youtube.com/@${handle}/videos`)) : null,
-  ].filter((fn): fn is () => Promise<YtThumb[]> => !!fn);
-
-  for (const fn of lookups) {
-    const videos = await fn();
-    if (videos.length) {
-      feedCache.set(feedKey(s), { at: Date.now(), videos });
-      return videos;
-    }
-  }
-  return cached?.videos ?? [];
-}
-
 function slugify(s: string) {
   return (
     s
@@ -342,40 +72,68 @@ function slugify(s: string) {
   );
 }
 
-function decorate(p: GrowProject): GrowProject {
+/** A user's oldest project is the free one, including projects created before this rule was stored. */
+const PROJECT_SELECT = `select p.*, not exists (select 1 from public.qr_projects o where o.user_id = p.user_id and o.created_at < p.created_at) as is_first
+  from public.qr_projects p`;
+
+function decorate(p: Row) {
   const code = p.share_code || p.slug;
+  const { is_first, ...rest } = p;
   return {
-    ...p,
+    ...rest,
     shop_url: `${SITE}/s/${encodeURIComponent(code)}?p=${encodeURIComponent(p.slug)}`,
     qr_url: `${SITE}/q/${encodeURIComponent(p.slug)}`,
     price_inr: Number(p.price_inr ?? PROJECT_PRICE_INR),
-    is_paid: !!p.is_paid,
+    ad_budget_inr: Number(p.ad_budget_inr ?? 0),
+    is_paid: !!p.is_paid || !!is_first,
   };
 }
 
-async function shareCode(sb: NonNullable<ReturnType<typeof tryServiceRole>>, userId: string, fallback: string) {
-  const rc = await sb.from("referral_codes").select("code").eq("user_id", userId).maybeSingle();
-  if (rc.data?.code) return String(rc.data.code);
-  const generated = `GROW-${fallback.replace(/[^A-Za-z0-9]/g, "").slice(0, 8).toUpperCase() || randomUUID().slice(0, 6)}`;
-  await sb.from("referral_codes").insert({ user_id: userId, code: generated }).then(() => undefined).catch(() => undefined);
-  return generated;
+async function shareCode(userId: string, fallback: string) {
+  const rc = await q(`select code from public.referral_codes where user_id = $1 limit 1`, [userId]);
+  if (rc.rows[0]?.code) return String(rc.rows[0].code);
+  const generated = `GROW-${fallback.replace(/[^A-Za-z0-9]/g, "").slice(0, 8).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+  await q(`insert into public.referral_codes (user_id, code) values ($1, $2)`, [userId, generated]).catch(() => undefined);
+  const again = await q(`select code from public.referral_codes where user_id = $1 limit 1`, [userId]);
+  return String(again.rows[0]?.code ?? generated);
 }
 
-function client() {
-  if (hasDatabase()) return getServiceRoleClient();
-  return tryServiceRole();
+async function ownProject(req: Request, res: Response): Promise<Row | null> {
+  const id = String(req.params.id);
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    fail(res, 404, "Project not found");
+    return null;
+  }
+  const { rows } = await q(`${PROJECT_SELECT} where p.id = $1 and p.user_id = $2`, [id, req.userId]);
+  if (!rows[0]) {
+    fail(res, 404, "Project not found");
+    return null;
+  }
+  return { ...rows[0], is_paid: !!rows[0].is_paid || !!rows[0].is_first };
 }
+
+/** Visits tagged with this project, plus untagged scans of the owner's share code (older QR prints). */
+const VISITS_WHERE = `(v.project_id = $1 or v.project_slug = $2 or (v.project_id is null and v.project_slug is null and v.code in ($2, $3)))`;
+
+async function optionalUserId(req: Request) {
+  const token = readBearer(req);
+  if (!token) return undefined;
+  try {
+    const { data } = await createUserClient(token).auth.getUser(token);
+    return data.user?.id ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Projects ────────────────────────────────────────────────────────────────
 
 growRouter.get(
   "/projects",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("qr_projects").select("*").eq("user_id", req.userId!).order("created_at", { ascending: false });
-      if (!error) return ok(res, { projects: (data ?? []).map((p) => decorate(p as GrowProject)) });
-    }
-    return ok(res, { projects: memProjects.filter((p) => p.user_id === req.userId).map(decorate), seeded: true });
+    const { rows } = await q(`${PROJECT_SELECT} where p.user_id = $1 order by p.created_at desc`, [req.userId]);
+    return ok(res, { projects: rows.map(decorate) });
   }),
 );
 
@@ -385,8 +143,8 @@ growRouter.post(
   asyncHandler(async (req, res) => {
     const parsed = z
       .object({
-        title: z.string().min(2).max(120),
-        business_name: z.string().max(120).optional(),
+        title: z.string().trim().min(2).max(120),
+        business_name: z.string().trim().max(120).optional(),
         contact_phone: z.string().max(20).optional(),
         city: z.string().max(80).optional(),
         category: z.string().max(80).optional(),
@@ -395,52 +153,47 @@ growRouter.post(
       })
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const slug = slugify(`${parsed.data.business_name || parsed.data.title}-${Date.now().toString(36)}`);
-    const sb = client();
-    if (sb) {
-      const code = await shareCode(sb, req.userId!, slug);
-      const row = {
-        user_id: req.userId,
-        title: parsed.data.title,
-        name: parsed.data.title,
-        slug,
-        business_name: parsed.data.business_name ?? parsed.data.title,
-        contact_phone: parsed.data.contact_phone ?? null,
-        city: parsed.data.city ?? null,
-        category: parsed.data.category ?? null,
-        theme_key: parsed.data.theme_key ?? "classic-amber",
-        accent_color: parsed.data.accent_color ?? "#d4af37",
-        is_paid: false,
-        price_inr: PROJECT_PRICE_INR,
-        share_code: code,
-      };
-      const { data, error } = await sb.from("qr_projects").insert(row).select("*").maybeSingle();
-      if (error || !data) {
-        console.error("[projects] insert failed:", error?.message ?? "no row");
-        return fail(res, 500, "Could not save the project.");
-      }
-        await sb
-          .from("digital_shops")
-          .upsert({ user_id: req.userId, name: parsed.data.title, slug, project_id: data.id }, { onConflict: "user_id" })
-          .then(() => undefined)
-          .catch(() => undefined);
-        return ok(res, { project: decorate(data as GrowProject) }, 201);
+    const d = parsed.data;
+    const slug = slugify(`${d.business_name || d.title}-${Date.now().toString(36)}`);
+    const code = await shareCode(req.userId!, slug);
+    const client = await getPool().connect();
+    try {
+      await client.query("begin");
+      await client.query(`select pg_advisory_xact_lock(hashtext('qr_projects:' || $1))`, [req.userId]);
+      const count = await client.query(`select count(*)::int n from public.qr_projects where user_id = $1`, [req.userId]);
+      const first = count.rows[0].n === 0;
+      const { rows } = await client.query(
+        `insert into public.qr_projects
+           (user_id, title, name, slug, business_name, contact_phone, city, category, theme_key, accent_color, is_paid, price_inr, share_code, created_at)
+         values ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now()) returning *`,
+        [
+          req.userId,
+          d.title,
+          slug,
+          d.business_name || d.title,
+          d.contact_phone ?? null,
+          d.city ?? null,
+          d.category ?? null,
+          d.theme_key ?? "classic-amber",
+          d.accent_color ?? "#d4af37",
+          first,
+          first ? 0 : PROJECT_PRICE_INR,
+          code,
+        ],
+      );
+      await client.query(
+        `insert into public.digital_shops (user_id, name, slug, project_id)
+         select $1, $2, $3, $4 where not exists (select 1 from public.digital_shops where user_id = $1)`,
+        [req.userId, d.business_name || d.title, slug, rows[0].id],
+      );
+      await client.query("commit");
+      return ok(res, { project: decorate(rows[0]) }, 201);
+    } catch (e) {
+      await client.query("rollback").catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
     }
-    const project: GrowProject = {
-      id: randomUUID(),
-      user_id: req.userId!,
-      title: parsed.data.title,
-      slug,
-      business_name: parsed.data.business_name ?? parsed.data.title,
-      city: parsed.data.city ?? null,
-      category: parsed.data.category ?? null,
-      is_paid: false,
-      price_inr: PROJECT_PRICE_INR,
-      share_code: slug,
-      created_at: new Date().toISOString(),
-    };
-    memProjects.unshift(project);
-    return ok(res, { project: decorate(project), seeded: true }, 201);
   }),
 );
 
@@ -448,127 +201,185 @@ growRouter.get(
   "/projects/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("qr_projects").select("*").eq("id", id).eq("user_id", req.userId!).maybeSingle();
-      if (!error && data) return ok(res, { project: decorate(data as GrowProject) });
-    }
-    const project = memProjects.find((p) => p.id === id && p.user_id === req.userId);
-    if (!project) return fail(res, 404, "project not found");
-    return ok(res, { project: decorate(project), seeded: true });
+    const project = await ownProject(req, res);
+    if (project) return ok(res, { project: decorate(project) });
   }),
 );
+
+const ProjectPatch = z
+  .object({
+    title: z.string().trim().min(2).max(120),
+    business_name: z.string().max(120),
+    description: z.string().max(2000),
+    contact_phone: z.string().max(20),
+    theme_key: z.string().max(40),
+    accent_color: z.string().max(20),
+    city: z.string().max(80),
+    category: z.string().max(80),
+    ads_enabled: z.boolean(),
+    ad_budget_inr: z.number().min(0).max(1_000_000),
+    trade_type: z.string().max(80),
+    avatar_url: z.string().max(2000),
+    cover_image_url: z.string().max(2000),
+  })
+  .partial();
 
 growRouter.patch(
   "/projects/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z
-      .object({
-        title: z.string().min(2).max(120).optional(),
-        business_name: z.string().max(120).optional(),
-        description: z.string().max(2000).optional(),
-        contact_phone: z.string().max(20).optional(),
-        theme_key: z.string().max(40).optional(),
-        accent_color: z.string().max(20).optional(),
-        city: z.string().max(80).optional(),
-        category: z.string().max(80).optional(),
-        ads_enabled: z.boolean().optional(),
-        ad_budget_inr: z.number().min(0).optional(),
-        trade_type: z.string().max(80).optional(),
-        avatar_url: z.string().max(2000).optional(),
-        cover_image_url: z.string().max(2000).optional(),
-      })
-      .safeParse(req.body ?? {});
+    const parsed = ProjectPatch.safeParse(req.body ?? {});
     if (!parsed.success) return zodFail(res, parsed.error);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb
-        .from("qr_projects")
-        .update(parsed.data)
-        .eq("id", id)
-        .eq("user_id", req.userId!)
-        .select("*")
-        .maybeSingle();
-      if (!error && data) return ok(res, { project: decorate(data as GrowProject) });
-    }
-    const project = memProjects.find((p) => p.id === id && p.user_id === req.userId);
-    if (!project) return fail(res, 404, "project not found");
-    Object.assign(project, parsed.data);
-    return ok(res, { project: decorate(project), seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const entries = Object.entries(parsed.data).filter(([, v]) => v !== undefined);
+    if (!entries.length) return ok(res, { project: decorate(project) });
+    const sets = entries.map(([k], i) => `${k} = $${i + 3}`).join(", ");
+    await q(`update public.qr_projects set ${sets} where id = $1 and user_id = $2`, [project.id, req.userId, ...entries.map(([, v]) => v)]);
+    const { rows } = await q(`${PROJECT_SELECT} where p.id = $1`, [project.id]);
+    return ok(res, { project: decorate(rows[0]) });
   }),
 );
+
+growRouter.delete(
+  "/projects/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const project = await ownProject(req, res);
+    if (!project) return;
+    await q(`delete from public.shop_products where project_id = $1 and user_id = $2`, [project.id, req.userId]);
+    await q(`delete from public.qr_campaigns where project_id = $1`, [project.id]);
+    await q(`delete from public.merchant_link_settings where project_id = $1 and user_id = $2`, [project.id, req.userId]);
+    await q(`update public.digital_shops set project_id = null where project_id = $1`, [project.id]);
+    await q(`delete from public.qr_projects where id = $1 and user_id = $2`, [project.id, req.userId]);
+    return ok(res, { deleted: true });
+  }),
+);
+
+// ── Payment (2nd+ project) ──────────────────────────────────────────────────
+
+growRouter.post(
+  "/projects/:id/pay",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const project = await ownProject(req, res);
+    if (!project) return;
+    if (project.is_paid) return ok(res, { paid: true, project: decorate(project) });
+    const origin = (req.headers.origin as string) || SITE;
+    const r = await createOrder(req.userId!, { purpose: "qr_project", project_id: project.id }, origin);
+    if (!r.ok) return fail(res, 400, r.error, r);
+    return ok(res, { ...r, paid: false, project_id: project.id });
+  }),
+);
+
+// ── Visitors ────────────────────────────────────────────────────────────────
 
 growRouter.get(
   "/projects/:id/visits",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data: project } = await sb.from("qr_projects").select("id, slug, share_code").eq("id", id).eq("user_id", req.userId!).maybeSingle();
-      if (project) {
-        const { data, error } = await sb
-          .from("shop_visits")
-          .select("*")
-          .or(`project_id.eq.${id},project_slug.eq.${project.slug},code.eq.${project.share_code ?? project.slug}`)
-          .order("created_at", { ascending: false })
-          .limit(200);
-        if (error) console.error("[visits] list failed:", error.message);
-        return ok(res, { visits: data ?? [] });
-      }
-    }
-    return ok(res, { visits: [], seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const { rows } = await q(
+      `select v.*, count(*) over (partition by nullif(right(regexp_replace(coalesce(v.visitor_phone, ''), '\\D', '', 'g'), 10), '')) as phone_visits
+         from public.shop_visits v
+        where ${VISITS_WHERE}
+        order by v.created_at desc limit 300`,
+      [project.id, project.slug, project.share_code ?? project.slug],
+    );
+    return ok(res, {
+      visits: rows.map((r) => ({ ...r, visit_count: r.visitor_phone ? Number(r.phone_visits) : 1, phone_visits: undefined })),
+    });
   }),
 );
+
+growRouter.post(
+  "/projects/:id/visits",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = z
+      .object({
+        visitor_name: z.string().trim().min(1).max(120),
+        visitor_phone: z.string().max(20).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const phone = parsed.data.visitor_phone?.replace(/\D/g, "").slice(-10) || null;
+    const { rows } = await q(
+      `insert into public.shop_visits (project_id, project_slug, code, kind, source, visitor_name, visitor_phone, created_at)
+       values ($1, $2, $3, 'manual', 'grow-app', $4, $5, now()) returning *`,
+      [project.id, project.slug, project.share_code || project.slug, parsed.data.visitor_name, phone],
+    );
+    return ok(res, { visit: rows[0] }, 201);
+  }),
+);
+
+growRouter.get(
+  "/projects/:id/analytics",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const days = Math.min(90, Math.max(7, Number(req.query.days) || 7));
+    const { rows } = await q(
+      `with d as (select generate_series(current_date - ($4::int - 1), current_date, interval '1 day')::date as day)
+       select to_char(d.day, 'YYYY-MM-DD') as day,
+              count(v.id)::int as visitors,
+              count(distinct coalesce(nullif(right(regexp_replace(coalesce(v.visitor_phone, ''), '\\D', '', 'g'), 10), ''), v.id::text))::int as "unique",
+              count(distinct nullif(right(regexp_replace(coalesce(v.visitor_phone, ''), '\\D', '', 'g'), 10), ''))::int as customers
+         from d left join public.shop_visits v on v.created_at::date = d.day and ${VISITS_WHERE}
+        group by d.day order by d.day`,
+      [project.id, project.slug, project.share_code ?? project.slug, days],
+    );
+    const totals = rows.reduce(
+      (t, r) => ({ visits: t.visits + r.visitors, unique: t.unique + r.unique, customers: t.customers + r.customers }),
+      { visits: 0, unique: 0, customers: 0 },
+    );
+    return ok(res, { days: rows, totals });
+  }),
+);
+
+// ── Products / orders ───────────────────────────────────────────────────────
 
 growRouter.get(
   "/projects/:id/products",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("shop_products").select("*").eq("project_id", id).order("created_at", { ascending: false });
-      if (!error) return ok(res, { products: data ?? [] });
-    }
-    return ok(res, { products: memProducts.filter((p) => p.project_id === id), seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const { rows } = await q(
+      `select * from public.shop_products where project_id = $1 and user_id = $2 order by is_active desc, created_at desc`,
+      [project.id, req.userId],
+    );
+    return ok(res, { products: rows.map((p) => ({ ...p, price: Number(p.price ?? 0), stock: Number(p.stock ?? 0) })) });
   }),
 );
+
+const ProductBody = z.object({
+  name: z.string().trim().min(1).max(160),
+  price: z.number().min(0).max(1_000_000),
+  category: z.string().trim().max(80).nullable(),
+  stock: z.number().int().min(0).max(1_000_000),
+  is_active: z.boolean(),
+});
 
 growRouter.post(
   "/projects/:id/products",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z
-      .object({
-        name: z.string().min(1).max(160),
-        price: z.number().min(0).max(1_000_000).optional(),
-        category: z.string().max(80).optional(),
-        stock: z.number().min(0).max(1_000_000).optional(),
-      })
-      .safeParse(req.body);
+    const parsed = ProductBody.partial({ price: true, category: true, stock: true, is_active: true }).safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const row = {
-      project_id: id,
-      user_id: req.userId,
-      name: parsed.data.name,
-      price: parsed.data.price ?? 0,
-      category: parsed.data.category ?? null,
-      stock: parsed.data.stock ?? 0,
-      is_active: true,
-    };
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("shop_products").insert(row).select("*").maybeSingle();
-      if (!error && data) return ok(res, { product: data }, 201);
-    }
-    const product: ShopProduct = { id: randomUUID(), ...row, user_id: req.userId!, created_at: new Date().toISOString(), is_active: true, stock: row.stock ?? 0, price: row.price ?? 0 };
-    memProducts.unshift(product);
-    return ok(res, { product, seeded: true }, 201);
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const d = parsed.data;
+    const { rows } = await q(
+      `insert into public.shop_products (project_id, user_id, name, price, category, stock, is_active, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, now()) returning *`,
+      [project.id, req.userId, d.name, d.price ?? 0, d.category || null, d.stock ?? 0, d.is_active ?? true],
+    );
+    return ok(res, { product: rows[0] }, 201);
   }),
 );
 
@@ -576,26 +387,30 @@ growRouter.patch(
   "/products/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z
-      .object({
-        name: z.string().min(1).max(160).optional(),
-        price: z.number().min(0).optional(),
-        stock: z.number().min(0).optional(),
-        category: z.string().max(80).optional(),
-        is_active: z.boolean().optional(),
-      })
-      .safeParse(req.body ?? {});
+    const parsed = ProductBody.partial().safeParse(req.body ?? {});
     if (!parsed.success) return zodFail(res, parsed.error);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("shop_products").update(parsed.data).eq("id", id).eq("user_id", req.userId!).select("*").maybeSingle();
-      if (!error && data) return ok(res, { product: data });
-    }
-    const product = memProducts.find((p) => p.id === id && p.user_id === req.userId);
-    if (!product) return fail(res, 404, "product not found");
-    Object.assign(product, parsed.data);
-    return ok(res, { product, seeded: true });
+    const entries = Object.entries(parsed.data).filter(([, v]) => v !== undefined);
+    if (!entries.length) return fail(res, 400, "Nothing to update");
+    const sets = entries.map(([k], i) => `${k} = $${i + 3}`).join(", ");
+    const { rows } = await q(
+      `update public.shop_products set ${sets}, updated_at = now() where id = $1 and user_id = $2 and project_id is not null returning *`,
+      [String(req.params.id), req.userId, ...entries.map(([, v]) => v)],
+    );
+    if (!rows[0]) return fail(res, 404, "Product not found");
+    return ok(res, { product: rows[0] });
+  }),
+);
+
+growRouter.delete(
+  "/products/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rowCount } = await q(`delete from public.shop_products where id = $1 and user_id = $2 and project_id is not null`, [
+      String(req.params.id),
+      req.userId,
+    ]);
+    if (!rowCount) return fail(res, 404, "Product not found");
+    return ok(res, { deleted: true });
   }),
 );
 
@@ -603,27 +418,43 @@ growRouter.get(
   "/projects/:id/orders",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("shop_orders").select("*").eq("project_id", id).order("created_at", { ascending: false });
-      if (!error) return ok(res, { orders: data ?? [] });
-    }
-    return ok(res, { orders: memOrders.filter((o) => o.project_id === id), seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const { rows } = await q(`select * from public.shop_orders where project_id = $1 order by created_at desc limit 300`, [project.id]);
+    return ok(res, { orders: rows.map((o) => ({ ...o, total_inr: Number(o.total_inr ?? 0) })) });
   }),
 );
+
+export const GROW_ORDER_STATUSES = ["new", "confirmed", "ready", "delivered", "cancelled", "inquiry", "replied"] as const;
+
+growRouter.patch(
+  "/orders/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ status: z.enum(GROW_ORDER_STATUSES) }).safeParse(req.body ?? {});
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const { rows } = await q(
+      `update public.shop_orders o set status = $3, updated_at = now()
+         from public.qr_projects p
+        where o.id = $1 and p.id = o.project_id and p.user_id = $2
+        returning o.*`,
+      [String(req.params.id), req.userId, parsed.data.status],
+    );
+    if (!rows[0]) return fail(res, 404, "Order not found");
+    return ok(res, { order: { ...rows[0], total_inr: Number(rows[0].total_inr ?? 0) } });
+  }),
+);
+
+// ── Campaigns ───────────────────────────────────────────────────────────────
 
 growRouter.get(
   "/projects/:id/campaigns",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("qr_campaigns").select("*").eq("project_id", id).order("created_at", { ascending: false });
-      if (!error) return ok(res, { campaigns: data ?? [] });
-    }
-    return ok(res, { campaigns: memCampaigns.filter((c) => c.project_id === id), seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const { rows } = await q(`select * from public.qr_campaigns where project_id = $1 order by created_at desc`, [project.id]);
+    return ok(res, { campaigns: rows.map((c) => ({ ...c, budget_inr: Number(c.budget_inr ?? 0) })) });
   }),
 );
 
@@ -631,36 +462,26 @@ growRouter.post(
   "/projects/:id/campaigns",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z.object({ title: z.string().min(2).max(120), budget_inr: z.number().min(0).optional() }).safeParse(req.body);
+    const parsed = z.object({ title: z.string().trim().min(2).max(120), budget_inr: z.number().min(0).max(1_000_000).optional() }).safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const row = {
-      project_id: id,
-      user_id: req.userId,
-      title: parsed.data.title,
-      budget_inr: parsed.data.budget_inr ?? 0,
-      clicks: 0,
-      status: "draft",
-    };
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("qr_campaigns").insert(row).select("*").maybeSingle();
-      if (!error && data) return ok(res, { campaign: data }, 201);
-    }
-    const campaign: Campaign = { id: randomUUID(), ...row, user_id: req.userId!, created_at: new Date().toISOString() };
-    memCampaigns.unshift(campaign);
-    return ok(res, { campaign, seeded: true }, 201);
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const { rows } = await q(
+      `insert into public.qr_campaigns (project_id, user_id, title, budget_inr, clicks, status, created_at)
+       values ($1, $2, $3, $4, 0, 'requested', now()) returning *`,
+      [project.id, req.userId, parsed.data.title, parsed.data.budget_inr ?? 0],
+    );
+    return ok(res, { campaign: { ...rows[0], budget_inr: Number(rows[0].budget_inr ?? 0) } }, 201);
   }),
 );
+
+// ── Public catalog ──────────────────────────────────────────────────────────
 
 growRouter.get(
   "/themes",
   asyncHandler(async (_req, res) => {
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("qr_landing_themes").select("*").eq("is_active", true);
-      if (!error && data && data.length) return ok(res, { themes: data });
-    }
+    const { rows } = await q(`select * from public.qr_landing_themes where is_active = true`).catch(() => ({ rows: [] as Row[] }));
+    if (rows.length) return ok(res, { themes: rows });
     return ok(res, {
       themes: [
         { key: "classic", name: "Classic gold", accent_color: "#d4af37", bg_from: "#1a1208", bg_to: "#0a0804", is_premium: false },
@@ -673,63 +494,33 @@ growRouter.get(
 growRouter.get(
   "/shop-feed",
   asyncHandler(async (req, res) => {
-    let excludeUserId: string | undefined;
-    const token = readBearer(req);
-    if (token) {
-      try {
-        const { data } = await createUserClient(token).auth.getUser(token);
-        if (data.user?.id) excludeUserId = data.user.id;
-      } catch {
-        /* public feed */
-      }
-    }
-    const q = typeof req.query.q === "string" ? req.query.q : "";
-    const city = typeof req.query.city === "string" ? req.query.city : "";
-    const category = typeof req.query.category === "string" ? req.query.category : "";
-    const trade = typeof req.query.trade === "string" ? req.query.trade : "";
-    const limit = Number(req.query.limit ?? 12);
-    const offset = Number(req.query.offset ?? 0);
+    const str = (v: unknown) => (typeof v === "string" ? v : "");
     const rows = await listPublicShopFeed({
-      q,
-      city: city || null,
-      category: category || null,
-      trade: trade || null,
-      limit,
-      offset,
-      excludeUserId,
+      q: str(req.query.q),
+      city: str(req.query.city) || null,
+      category: str(req.query.category) || null,
+      trade: str(req.query.trade) || null,
+      limit: Number(req.query.limit ?? 12),
+      offset: Number(req.query.offset ?? 0),
+      excludeUserId: await optionalUserId(req),
     });
     return ok(res, { rows });
   }),
 );
 
+// ── ALL Program ─────────────────────────────────────────────────────────────
+
 growRouter.get(
   "/programs",
-  asyncHandler(async (_req, res) => {
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb.from("vendor_programs").select("*").eq("is_active", true).order("created_at", { ascending: false });
-      if (!error && data && data.length) return ok(res, { programs: data });
-    }
-    return ok(res, {
-      programs: [
-        {
-          id: "all-program",
-          title: "ALL Program — City partners",
-          city: "Pan India",
-          trade: "Multi-trade",
-          description: "Featured vendors who accept Assan Grow QR walk-ins and share leads.",
-          is_active: true,
-        },
-        {
-          id: "gold-shopfront",
-          title: "Gold shopfront",
-          city: "Delhi NCR",
-          trade: "Retail",
-          description: "Premium placement on the digital shop catalog.",
-          is_active: true,
-        },
-      ],
-    });
+  asyncHandler(async (req, res) => {
+    const userId = await optionalUserId(req);
+    const { rows } = await q(
+      `select p.*, (select count(distinct j.user_id)::int from public.vendor_program_joins j where j.program_id = p.id) as members,
+              exists (select 1 from public.vendor_program_joins j where j.program_id = p.id and j.user_id = $1) as joined
+         from public.vendor_programs p where p.is_active = true order by p.created_at`,
+      [userId ?? null],
+    );
+    return ok(res, { programs: rows });
   }),
 );
 
@@ -737,310 +528,121 @@ growRouter.post(
   "/programs/:id/join",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const programId = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data, error } = await sb
-        .from("vendor_program_joins")
-        .insert({ program_id: programId, user_id: req.userId })
-        .select("*")
-        .maybeSingle();
-      if (!error) return ok(res, { join: data }, 201);
-    }
-    const join = { id: randomUUID(), program_id: programId, user_id: req.userId! };
-    memJoins.unshift(join);
-    return ok(res, { join, seeded: true }, 201);
-  }),
-);
-
-growRouter.post(
-  "/projects/:id/pay",
-  requireAuth,
-  asyncHandler(async (req, res) => {
     const id = String(req.params.id);
-    let svc: Awaited<ReturnType<typeof pickService>> = null;
-    try {
-      svc = await pickService("vendor_wallet_recharge");
-    } catch {
-      svc = null;
-    }
-    if (!svc?.app_id || !svc.secret_key) {
-      return ok(res, {
-        paid: false,
-        needs_keys: true,
-        price_inr: PROJECT_PRICE_INR,
-        message: "Add Cashfree App ID & Secret in admin to charge ₹599. Project stays draft until keys exist.",
-      });
-    }
-    const created = await createCashfreeOrder(
-      req.userId!,
-      { amount_inr: PROJECT_PRICE_INR, purpose: "vendor_wallet_recharge" },
-      env.corsOrigin === "*" ? SITE : env.corsOrigin.split(",")[0] ?? SITE,
+    const program = await q(`select id from public.vendor_programs where id::text = $1 and is_active = true`, [id]);
+    if (!program.rows[0]) return fail(res, 404, "Program not found");
+    await q(
+      `insert into public.vendor_program_joins (program_id, user_id, created_at)
+       select $1, $2, now() where not exists (select 1 from public.vendor_program_joins where program_id = $1 and user_id = $2)`,
+      [program.rows[0].id, req.userId],
     );
-    if (!created.ok) {
-      return ok(res, { paid: false, needs_keys: true, price_inr: PROJECT_PRICE_INR, message: created.error });
-    }
-    return ok(res, { paid: false, needs_keys: false, price_inr: PROJECT_PRICE_INR, ...created, project_id: id });
-  }),
-);
-
-growRouter.post(
-  "/projects/:id/pay/verify",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const orderId = typeof req.body?.order_id === "string" ? req.body.order_id : "";
-    if (!orderId) return fail(res, 400, "order_id required");
-    const sb = client();
-    if (sb) {
-      const { data } = await sb
-        .from("qr_projects")
-        .update({ is_paid: true })
-        .eq("id", id)
-        .eq("user_id", req.userId!)
-        .select("*")
-        .maybeSingle();
-      if (data) return ok(res, { project: decorate(data as GrowProject), paid: true });
-    }
-    const project = memProjects.find((p) => p.id === id && p.user_id === req.userId);
-    if (project) project.is_paid = true;
-    return ok(res, { paid: true, project: project ? decorate(project) : null, order_id: orderId });
+    return ok(res, { joined: true });
   }),
 );
 
 growRouter.delete(
-  "/projects/:id",
+  "/programs/:id/join",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { error } = await sb.from("qr_projects").delete().eq("id", id).eq("user_id", req.userId!);
-      if (!error) return ok(res, { deleted: true });
-    }
-    const idx = memProjects.findIndex((p) => p.id === id && p.user_id === req.userId);
-    if (idx >= 0) memProjects.splice(idx, 1);
-    return ok(res, { deleted: true, seeded: true });
+    await q(`delete from public.vendor_program_joins where program_id::text = $1 and user_id = $2`, [String(req.params.id), req.userId]);
+    return ok(res, { joined: false });
   }),
 );
 
-growRouter.post(
-  "/projects/:id/visits",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z
-      .object({
-        visitor_name: z.string().min(1).max(120),
-        visitor_phone: z.string().max(20).optional(),
-      })
-      .safeParse(req.body);
-    if (!parsed.success) return zodFail(res, parsed.error);
-    const sb = client();
-    if (sb) {
-      const { data: project } = await sb
-        .from("qr_projects")
-        .select("id, slug, share_code")
-        .eq("id", id)
-        .eq("user_id", req.userId!)
-        .maybeSingle();
-      if (project) {
-        const row = {
-          project_id: id,
-          project_slug: project.slug,
-          code: project.share_code || project.slug,
-          kind: "manual",
-          source: "grow-app",
-          visitor_name: parsed.data.visitor_name,
-          visitor_phone: parsed.data.visitor_phone ?? null,
-        };
-        const { data, error } = await sb.from("shop_visits").insert(row).select("*").maybeSingle();
-        if (error || !data) {
-          console.error("[visits] insert failed:", error?.message ?? "no row");
-          return fail(res, 500, "Could not save the visitor.");
-        }
-        return ok(res, { visit: data }, 201);
-      }
-    }
-    return ok(res, {
-      visit: {
-        id: randomUUID(),
-        project_id: id,
-        visitor_name: parsed.data.visitor_name,
-        visitor_phone: parsed.data.visitor_phone ?? null,
-        created_at: new Date().toISOString(),
-      },
-      seeded: true,
-    }, 201);
-  }),
-);
-
-growRouter.get(
-  "/projects/:id/analytics",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const days = Math.min(90, Math.max(7, Number(req.query.days) || 7));
-    const sb = client();
-    let visits: Array<{ created_at?: string; visitor_phone?: string | null }> = [];
-    if (sb) {
-      const { data: project } = await sb.from("qr_projects").select("id, slug, share_code").eq("id", id).eq("user_id", req.userId!).maybeSingle();
-      if (project) {
-        const { data } = await sb
-          .from("shop_visits")
-          .select("created_at, visitor_phone")
-          .or(`project_id.eq.${id},project_slug.eq.${project.slug}`)
-          .order("created_at", { ascending: false })
-          .limit(500);
-        visits = (data ?? []) as typeof visits;
-      }
-    }
-    const out: { day: string; visitors: number; unique: number; customers: number }[] = [];
-    const base = new Date();
-    base.setHours(0, 0, 0, 0);
-    for (let i = days - 1; i >= 0; i--) {
-      const start = new Date(base);
-      start.setDate(start.getDate() - i);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 1);
-      const inDay = visits.filter((v) => {
-        const t = new Date(v.created_at ?? 0).getTime();
-        return t >= start.getTime() && t < end.getTime();
-      });
-      out.push({
-        day: start.toISOString().slice(0, 10),
-        visitors: inDay.length,
-        unique: inDay.length,
-        customers: inDay.filter((r) => r.visitor_phone).length,
-      });
-    }
-    return ok(res, {
-      days: out,
-      totals: {
-        visits: visits.length,
-        unique: visits.length,
-        customers: visits.filter((v) => v.visitor_phone).length,
-      },
-    });
-  }),
-);
+// ── Tutorials / links / YouTube ─────────────────────────────────────────────
 
 growRouter.get(
   "/tutorial/:section",
   requireAuth,
   asyncHandler(async (req, res) => {
     const section = String(req.params.section || "").trim();
-    const sb = client();
-    if (sb && section) {
-      const { data } = await sb
-        .from("oneqr_tutorial_videos")
-        .select("id, section, title, caption, youtube_url, video_url, is_active")
-        .eq("section", section)
-        .eq("is_active", true)
-        .maybeSingle();
-      return ok(res, { video: data ?? null });
-    }
-    return ok(res, { video: null });
+    const { rows } = await q(
+      `select id, section, title, caption, youtube_url, video_url, is_active from public.oneqr_tutorial_videos
+        where section = $1 and is_active = true order by updated_at desc nulls last limit 1`,
+      [section],
+    ).catch(() => ({ rows: [] as Row[] }));
+    return ok(res, { video: rows[0] ?? null });
   }),
 );
+
+function linkSettingsOut(r: Row, project: Row, fallback: Row = {}) {
+  return {
+    ...defaultLinkSettings(),
+    ...r,
+    extra_links: jsonValue(r.extra_links, fallback.extra_links ?? []),
+    poster_media: jsonValue(r.poster_media, fallback.poster_media ?? []),
+    poster_bg_urls: jsonValue(r.poster_bg_urls, fallback.poster_bg_urls ?? []),
+    yt_products: jsonValue(r.yt_products, fallback.yt_products ?? {}),
+    ig_products: jsonValue(r.ig_products, fallback.ig_products ?? {}),
+    pin_products: jsonValue(r.pin_products, fallback.pin_products ?? {}),
+    payment_enabled: !!r.payment_enabled,
+    premium_unlocked: !!r.premium_unlocked || !!project.is_paid,
+  };
+}
 
 growRouter.get(
   "/projects/:id/links",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const sb = client();
-    if (sb) {
-      const { data: project } = await sb
-        .from("qr_projects")
-        .select("id, is_paid")
-        .eq("id", id)
-        .eq("user_id", req.userId!)
-        .maybeSingle();
-      if (!project) return fail(res, 404, "project not found");
-      let { data: row } = await sb
-        .from("merchant_link_settings")
-        .select("*")
-        .eq("user_id", req.userId!)
-        .eq("project_id", id)
-        .maybeSingle();
-      if (!row) {
-        const fallback = await sb
-          .from("merchant_link_settings")
-          .select("*")
-          .eq("user_id", req.userId!)
-          .order("updated_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        row = fallback.data;
-      }
-      const r = (row ?? {}) as Record<string, unknown>;
-      return ok(res, {
-        settings: {
-          ...defaultLinkSettings(),
-          ...r,
-          extra_links: jsonValue(r.extra_links, []),
-          poster_media: jsonValue(r.poster_media, []),
-          poster_bg_urls: jsonValue(r.poster_bg_urls, []),
-          yt_products: jsonValue(r.yt_products, {}),
-          ig_products: jsonValue(r.ig_products, {}),
-          pin_products: jsonValue(r.pin_products, {}),
-          premium_unlocked: !!r.premium_unlocked || !!(project as { is_paid?: boolean }).is_paid,
-        },
-      });
-    }
-    return ok(res, { settings: memLinks.get(`${req.userId}:${id}`) ?? defaultLinkSettings(), seeded: true });
+    const project = await ownProject(req, res);
+    if (!project) return;
+    const own = await q(`select * from public.merchant_link_settings where user_id = $1 and project_id = $2 limit 1`, [req.userId, project.id]);
+    const row =
+      own.rows[0] ??
+      (await q(`select * from public.merchant_link_settings where user_id = $1 order by updated_at desc nulls last limit 1`, [req.userId])).rows[0] ??
+      {};
+    const { id: _id, project_id: _pid, ...rest } = row;
+    return ok(res, { settings: linkSettingsOut(own.rows[0] ? row : rest, project) });
   }),
 );
+
+const LinksBody = z.object({
+  play_store_enabled: z.boolean().optional(),
+  payment_enabled: z.boolean().optional(),
+  payment_provider: z.string().max(40).optional(),
+  payment_upi_id: z.string().max(200).optional(),
+  payment_label: z.string().max(80).optional(),
+  payment_amount_inr: z.union([z.string(), z.number()]).optional(),
+  digital_shop_enabled: z.boolean().optional(),
+  digital_shop_url: z.string().max(2000).optional(),
+  extra_links: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        url: z.string(),
+        enabled: z.boolean().optional(),
+        category: z.string().optional(),
+        price: z.union([z.string(), z.number()]).optional().nullable(),
+        image: z.string().optional().nullable(),
+      }),
+    )
+    .optional(),
+  premium_unlocked: z.boolean().optional(),
+  poster_media: z.array(z.record(z.unknown())).optional(),
+  poster_bg_urls: z.array(z.string()).optional(),
+  poster_bg_url: z.string().nullable().optional(),
+  yt_source: z.string().max(400).optional().nullable(),
+  yt_enabled: z.boolean().optional(),
+  yt_products: z.record(z.unknown()).optional(),
+  ig_source: z.string().max(400).optional().nullable(),
+  ig_enabled: z.boolean().optional(),
+  ig_products: z.record(z.unknown()).optional(),
+  pin_source: z.string().max(400).optional().nullable(),
+  pin_enabled: z.boolean().optional(),
+  pin_products: z.record(z.unknown()).optional(),
+});
 
 growRouter.put(
   "/projects/:id/links",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id);
-    const parsed = z
-      .object({
-        play_store_enabled: z.boolean().optional(),
-        payment_enabled: z.boolean().optional(),
-        payment_provider: z.string().max(40).optional(),
-        payment_upi_id: z.string().max(200).optional(),
-        payment_label: z.string().max(80).optional(),
-        payment_amount_inr: z.union([z.string(), z.number()]).optional(),
-        digital_shop_enabled: z.boolean().optional(),
-        digital_shop_url: z.string().max(2000).optional(),
-        extra_links: z
-          .array(
-            z.object({
-              id: z.string(),
-              label: z.string(),
-              url: z.string(),
-              enabled: z.boolean().optional(),
-              category: z.string().optional(),
-              price: z.union([z.string(), z.number()]).optional().nullable(),
-              image: z.string().optional().nullable(),
-            }),
-          )
-          .optional(),
-        premium_unlocked: z.boolean().optional(),
-        poster_media: z.array(z.record(z.unknown())).optional(),
-        poster_bg_urls: z.array(z.string()).optional(),
-        poster_bg_url: z.string().nullable().optional(),
-        yt_source: z.string().max(400).optional().nullable(),
-        yt_enabled: z.boolean().optional(),
-        yt_products: z.record(z.unknown()).optional(),
-        ig_source: z.string().max(400).optional().nullable(),
-        ig_enabled: z.boolean().optional(),
-        ig_products: z.record(z.unknown()).optional(),
-        pin_source: z.string().max(400).optional().nullable(),
-        pin_enabled: z.boolean().optional(),
-        pin_products: z.record(z.unknown()).optional(),
-      })
-      .safeParse(req.body ?? {});
+    const parsed = LinksBody.safeParse(req.body ?? {});
     if (!parsed.success) return zodFail(res, parsed.error);
-    const sb = client();
-    const extraLinks = parsed.data.extra_links;
-    const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    const project = await ownProject(req, res);
+    if (!project) return;
     const d = parsed.data;
+    const payload: Row = {};
     for (const key of [
       "play_store_enabled",
       "payment_enabled",
@@ -1049,7 +651,6 @@ growRouter.put(
       "payment_label",
       "digital_shop_enabled",
       "digital_shop_url",
-      "premium_unlocked",
       "poster_bg_url",
       "yt_source",
       "yt_enabled",
@@ -1063,67 +664,50 @@ growRouter.put(
     if (d.payment_amount_inr !== undefined) {
       payload.payment_amount_inr = d.payment_amount_inr === "" ? null : Number(d.payment_amount_inr) || null;
     }
-    if (extraLinks !== undefined) payload.extra_links = JSON.stringify(extraLinks);
+    if (d.extra_links !== undefined) payload.extra_links = JSON.stringify(d.extra_links);
     if (d.poster_media !== undefined) {
-      const media = d.poster_media.map((item) => {
-        const src = typeof item.src === "string" ? item.src : "";
-        if (src.startsWith("data:") && src.length > 180_000) {
-          return { ...item, src: "", poster: item.poster ?? null };
-        }
-        return item;
-      });
-      payload.poster_media = JSON.stringify(media);
+      payload.poster_media = JSON.stringify(
+        d.poster_media.map((item) => {
+          const src = typeof item.src === "string" ? item.src : "";
+          return src.startsWith("data:") && src.length > 180_000 ? { ...item, src: "", poster: item.poster ?? null } : item;
+        }),
+      );
     }
     if (d.poster_bg_urls !== undefined) payload.poster_bg_urls = JSON.stringify(d.poster_bg_urls);
-    if (d.yt_products !== undefined) payload.yt_products = JSON.stringify(d.yt_products);
-    if (d.ig_products !== undefined) payload.ig_products = JSON.stringify(d.ig_products);
-    if (d.pin_products !== undefined) payload.pin_products = JSON.stringify(d.pin_products);
-    if (sb) {
-      const { data: project } = await sb
-        .from("qr_projects")
-        .select("id, is_paid")
-        .eq("id", id)
-        .eq("user_id", req.userId!)
-        .maybeSingle();
-      if (!project) return fail(res, 404, "project not found");
-      const existing = await sb
-        .from("merchant_link_settings")
-        .select("id")
-        .eq("user_id", req.userId!)
-        .eq("project_id", id)
-        .maybeSingle();
-      const row = {
-        ...payload,
-        user_id: req.userId,
-        project_id: id,
-        premium_unlocked: parsed.data.premium_unlocked === true || !!(project as { is_paid?: boolean }).is_paid,
-      };
-      const saved = existing.data?.id
-        ? await sb.from("merchant_link_settings").update(row).eq("id", existing.data.id).select("*").maybeSingle()
-        : await sb.from("merchant_link_settings").insert(row).select("*").maybeSingle();
-      const savedRow = Array.isArray(saved.data) ? saved.data[0] : saved.data;
-      if (saved.error || !savedRow) {
-        console.error("[links] save failed:", saved.error?.message ?? "no row");
-        return fail(res, 500, "Could not save the link settings.");
-      }
-      const extra = (savedRow as { extra_links?: unknown }).extra_links;
-      return ok(res, {
-        settings: {
-          ...defaultLinkSettings(),
-          ...savedRow,
-          extra_links: jsonValue(extra, extraLinks ?? []),
-          poster_media: jsonValue((savedRow as { poster_media?: unknown }).poster_media, d.poster_media ?? []),
-          yt_products: jsonValue((savedRow as { yt_products?: unknown }).yt_products, d.yt_products ?? {}),
-          ig_products: jsonValue((savedRow as { ig_products?: unknown }).ig_products, d.ig_products ?? {}),
-          pin_products: jsonValue((savedRow as { pin_products?: unknown }).pin_products, d.pin_products ?? {}),
-          payment_enabled: !!(savedRow as { payment_enabled?: boolean }).payment_enabled,
-        },
-      });
+    for (const key of ["yt_products", "ig_products", "pin_products"] as const) {
+      if (d[key] !== undefined) payload[key] = JSON.stringify(d[key]);
     }
-    const prev = memLinks.get(`${req.userId}:${id}`) ?? defaultLinkSettings();
-    const next = { ...prev, ...parsed.data, extra_links: extraLinks ?? prev.extra_links };
-    memLinks.set(`${req.userId}:${id}`, next);
-    return ok(res, { settings: next, seeded: true });
+    // Premium links come with a paid project; the client can't grant them.
+    payload.premium_unlocked = !!project.is_paid;
+
+    const client = await getPool().connect();
+    try {
+      await client.query("begin");
+      await client.query(`select pg_advisory_xact_lock(hashtext('link_settings:' || $1))`, [project.id]);
+      const existing = await client.query(`select id from public.merchant_link_settings where user_id = $1 and project_id = $2 limit 1`, [
+        req.userId,
+        project.id,
+      ]);
+      const keys = Object.keys(payload);
+      const vals = keys.map((k) => payload[k]);
+      const saved = existing.rows[0]
+        ? await client.query(
+            `update public.merchant_link_settings set ${keys.map((k, i) => `${k} = $${i + 2}`).join(", ")}, updated_at = now() where id = $1 returning *`,
+            [existing.rows[0].id, ...vals],
+          )
+        : await client.query(
+            `insert into public.merchant_link_settings (user_id, project_id, ${keys.join(", ")}, updated_at)
+             values ($1, $2, ${keys.map((_, i) => `$${i + 3}`).join(", ")}, now()) returning *`,
+            [req.userId, project.id, ...vals],
+          );
+      await client.query("commit");
+      return ok(res, { settings: linkSettingsOut(saved.rows[0], project, d) });
+    } catch (e) {
+      await client.query("rollback").catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
+    }
   }),
 );
 
@@ -1132,7 +716,7 @@ growRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const source = String(req.query.source ?? "").trim();
-    if (!source) return fail(res, 400, "Channel ID / playlist link daalein");
+    if (!source) return fail(res, 400, "Enter a YouTube channel ID, @handle or playlist link");
     try {
       const videos = await youtubeFeedFromSource(source);
       if (!videos.length) return fail(res, 404, "No videos found on YouTube. Check the @handle, channel ID (UC…) or playlist link.");
@@ -1145,5 +729,3 @@ growRouter.get(
     }
   }),
 );
-
-export const growMem = { memProducts, memOrders, memProjects };

@@ -120,6 +120,9 @@ async function getAccessToken(sa: ServiceAccount): Promise<string> {
   return j.access_token;
 }
 
+/** Android channel ids must match the app: lead → lead_alerts_v3 (rings), message → chat_messages, default → default. */
+export type PushChannel = "lead" | "message" | "default";
+
 async function sendOne(opts: {
   projectId: string;
   accessToken: string;
@@ -130,30 +133,36 @@ async function sendOne(opts: {
   iconUrl?: string | null;
   actionUrl?: string | null;
   highPriority?: boolean;
+  channel?: PushChannel;
+  tag?: string;
   extraData?: Record<string, string>;
 }): Promise<{ ok: boolean; status: number; error?: string }> {
-  const isHigh = !!opts.highPriority;
+  const channel = opts.channel ?? (opts.highPriority ? "lead" : "default");
+  const isHigh = channel !== "default";
+  const rings = channel === "lead";
   const message: Record<string, unknown> = {
     token: opts.token,
     android: {
       priority: isHigh ? "HIGH" : "NORMAL",
-      ttl: isHigh ? "60s" : "3600s",
+      ttl: rings ? "60s" : "3600s",
+      ...(opts.tag ? { collapse_key: opts.tag } : {}),
       notification: {
-        channel_id: isHigh ? "lead_alerts_v3" : "default",
-        sound: isHigh ? "lead_ring" : "default",
-        notification_priority: isHigh ? "PRIORITY_MAX" : "PRIORITY_DEFAULT",
-        default_vibrate_timings: !isHigh,
+        channel_id: rings ? "lead_alerts_v3" : channel === "message" ? "chat_messages" : "default",
+        sound: rings ? "lead_ring" : "default",
+        notification_priority: rings ? "PRIORITY_MAX" : isHigh ? "PRIORITY_HIGH" : "PRIORITY_DEFAULT",
+        default_vibrate_timings: !rings,
         default_light_settings: true,
-        visibility: "PUBLIC",
+        visibility: rings ? "PUBLIC" : "PRIVATE",
+        ...(opts.tag ? { tag: opts.tag } : {}),
         ...(opts.imageUrl ? { image: opts.imageUrl } : {}),
       },
     },
     apns: {
-      headers: { "apns-priority": isHigh ? "10" : "5" },
+      headers: { "apns-priority": isHigh ? "10" : "5", ...(opts.tag ? { "apns-collapse-id": opts.tag.slice(0, 64) } : {}) },
       payload: {
         aps: {
-          sound: isHigh ? "lead_ring.caf" : "default",
-          "interruption-level": isHigh ? "time-sensitive" : "active",
+          sound: rings ? "lead_ring.caf" : "default",
+          "interruption-level": rings ? "time-sensitive" : "active",
           "mutable-content": 1,
           "content-available": 1,
         },
@@ -162,15 +171,16 @@ async function sendOne(opts: {
       ...(opts.imageUrl ? { fcm_options: { image: opts.imageUrl } } : {}),
     },
     webpush: {
-      headers: { Urgency: isHigh ? "high" : "normal", TTL: isHigh ? "60" : "3600" },
+      headers: { Urgency: isHigh ? "high" : "normal", TTL: rings ? "60" : "3600" },
       fcm_options: { link: opts.actionUrl || "/" },
       notification: {
         title: opts.title,
         body: opts.body,
-        requireInteraction: isHigh,
+        requireInteraction: rings,
         renotify: true,
         silent: false,
-        vibrate: isHigh ? [400, 150, 400, 150, 800] : [200, 100, 200],
+        ...(opts.tag ? { tag: opts.tag } : {}),
+        vibrate: rings ? [400, 150, 400, 150, 800] : [200, 100, 200],
         ...(opts.iconUrl ? { icon: opts.iconUrl } : {}),
         ...(opts.imageUrl ? { image: opts.imageUrl } : {}),
       },
@@ -210,6 +220,9 @@ export async function pushToUser(opts: {
   iconUrl?: string | null;
   actionUrl?: string | null;
   highPriority?: boolean;
+  channel?: PushChannel;
+  /** Same tag replaces the previous notification on the phone (one per chat thread). */
+  tag?: string;
   extraData?: Record<string, string>;
   campaignId?: string;
 }) {
@@ -251,6 +264,8 @@ export async function pushToUser(opts: {
       iconUrl: opts.iconUrl,
       actionUrl: opts.actionUrl,
       highPriority: opts.highPriority,
+      channel: opts.channel,
+      tag: opts.tag,
       extraData: opts.extraData,
     });
     if (r.ok) okCount += 1;
@@ -455,7 +470,7 @@ export async function sendStatusPushToCustomer(userId: string, data: z.infer<typ
     title,
     body,
     actionUrl: `/status?leadId=${lead.id}`,
-    highPriority: true,
+    channel: "message",
     extraData: { kind: "vendor_status", lead_id: lead.id as string, status_key: data.status_key },
   });
 }
