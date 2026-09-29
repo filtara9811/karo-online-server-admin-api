@@ -144,8 +144,9 @@ export async function rejectLeadForVendor(leadId: string, vendorId: string, reas
   return rows[0];
 }
 
-/** Online vendors who offer the lead's sub-category and are inside both the customer's search radius
- * and their own service radius (0 = serves anywhere), nearest first. */
+/** Vendors with an account who offer the lead's sub-category and are inside both the customer's search
+ * radius and their own service radius (0 = serves anywhere), nearest first. Offline vendors are included
+ * unless the customer asked for online only. */
 export async function findVendorsForLead(leadId: string) {
   const dist = distanceSql("l.lat", "l.lng", "coalesce(v.live_lat, v.lat)", "coalesce(v.live_lng, v.lng)");
   const { rows } = await getPool().query(
@@ -160,14 +161,16 @@ export async function findVendorsForLead(leadId: string) {
               join public.catalog_items ci on ci.id = m.item_id
               join public.vendors mv on mv.user_id = m.vendor_id, l
              where coalesce(m.is_active, true) and ci.category_id = l.sub_category_id
-               and coalesce(mv.is_online, true) and coalesce(mv.is_blocked, false) = false
+               and coalesce(mv.is_blocked, false) = false
                and coalesce(mv.status, 'active') in ('active', 'approved'))
      select v.user_id, coalesce(v.auto_accept_leads, false) as auto_accept
        from public.vendors v, l
       where v.user_id <> coalesce(l.customer_id, '00000000-0000-0000-0000-000000000000'::uuid)
         and coalesce(v.is_blocked, false) = false
         and coalesce(v.status, 'active') in ('active', 'approved')
-        and coalesce(v.is_online, true)
+        and (not coalesce(l.online_only, false) or coalesce(v.is_online, true))
+        -- Showcase and placeholder shops have no account, so there is nobody to notify.
+        and exists (select 1 from public.local_users u where u.id = v.user_id)
         and (l.lat is null
              or (coalesce(v.live_lat, v.lat) is not null
                  and ${dist} <= coalesce(l.search_radius_km, 5)
