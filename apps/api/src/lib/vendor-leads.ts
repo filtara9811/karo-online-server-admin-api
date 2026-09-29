@@ -156,8 +156,11 @@ export async function matchLeadToVendors(leadId: string) {
     `with l as (select * from public.leads where id = $1),
           mapped as (
             select distinct m.vendor_id from public.vendor_item_mappings m
-              join public.catalog_items ci on ci.id = m.item_id, l
-             where coalesce(m.is_active, true) and ci.category_id = l.sub_category_id)
+              join public.catalog_items ci on ci.id = m.item_id
+              join public.vendors mv on mv.user_id = m.vendor_id, l
+             where coalesce(m.is_active, true) and ci.category_id = l.sub_category_id
+               and coalesce(mv.is_online, true) and coalesce(mv.is_blocked, false) = false
+               and coalesce(mv.status, 'active') in ('active', 'approved'))
      select v.user_id, coalesce(v.auto_accept_leads, false) as auto_accept
        from public.vendors v, l
       where v.user_id <> coalesce(l.customer_id, '00000000-0000-0000-0000-000000000000'::uuid)
