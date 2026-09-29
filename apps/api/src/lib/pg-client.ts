@@ -17,12 +17,16 @@ export function getPool() {
   if (!env.databaseUrl) throw new Error("DATABASE_URL missing");
   if (!pool) {
     const connectionString = env.databaseUrl.replace(/[?&]sslmode=[^&]+/i, "").replace(/[?&]uselibpqcompat=[^&]+/i, "");
+    // Every serverless instance opens its own pool and frozen instances keep their sockets, so on Vercel each one
+    // must hold very few connections or the database runs out of slots.
+    const serverless = Boolean(process.env.VERCEL);
     pool = new Pool({
       connectionString,
       ssl: { rejectUnauthorized: false },
-      max: 8,
+      max: serverless ? 2 : 8,
       connectionTimeoutMillis: 15_000,
-      idleTimeoutMillis: 20_000,
+      idleTimeoutMillis: serverless ? 5_000 : 20_000,
+      allowExitOnIdle: serverless,
       keepAlive: true,
       keepAliveInitialDelayMillis: 10_000,
     });
