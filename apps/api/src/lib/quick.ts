@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createAnonClient, getServiceRoleClient, tryServiceRole } from "./supabase.js";
 import { kmBetween } from "./geo.js";
+import { getPool } from "./pg-client.js";
 
 export const QuickVendorsSchema = z.object({
   itemIds: z.array(z.string().uuid()).min(1).max(50),
@@ -93,28 +94,15 @@ export async function getNearbyOnlineVendors(data: z.infer<typeof NearbyOnlineSc
     let mappedVendorIds: string[] | null = null;
 
     if (itemIds.length || data.subCategoryId) {
-      let query = admin
-        .from("vendor_item_mappings")
-        .select("vendor_id, catalog_items!inner(category_id)")
-        .eq("is_active", true);
-      if (itemIds.length) query = query.in("item_id", itemIds);
-      if (data.subCategoryId) query = query.eq("catalog_items.category_id", data.subCategoryId);
-      const { data: mappings, error: mappingsError } = await query;
-      if (mappingsError) {
-        const { tableMissing, seedNearbyVendors } = await import("./memory.js");
-        if (tableMissing(mappingsError)) {
-          const vendors = seedNearbyVendors(data.origin);
-          return {
-            ok: true as const,
-            vendors,
-            onlineCount: vendors.filter((v) => v.is_online).length,
-            offlineCount: vendors.filter((v) => !v.is_online).length,
-            seeded: true,
-          };
-        }
-        return { ok: false as const, error: mappingsError.message, vendors: [], onlineCount: 0, offlineCount: 0 };
-      }
-      mappedVendorIds = Array.from(new Set((mappings ?? []).map((m) => String(m.vendor_id)).filter(Boolean)));
+      const { rows: mappings } = await getPool().query(
+        `select distinct m.vendor_id from public.vendor_item_mappings m
+           join public.catalog_items ci on ci.id = m.item_id
+          where coalesce(m.is_active, true)
+            and (cardinality($1::uuid[]) = 0 or m.item_id = any($1::uuid[]))
+            and ($2::uuid is null or ci.category_id = $2::uuid)`,
+        [itemIds, data.subCategoryId ?? null],
+      );
+      mappedVendorIds = Array.from(new Set(mappings.map((m) => String(m.vendor_id)).filter(Boolean)));
       if (mappedVendorIds.length === 0) mappedVendorIds = null;
     }
 

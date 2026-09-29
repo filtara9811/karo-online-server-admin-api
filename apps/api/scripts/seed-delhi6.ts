@@ -232,7 +232,7 @@ try {
       for (const itemId of cat.item_ids) {
         await client.query(
           `insert into public.vendor_item_mappings (id, vendor_id, item_id, is_active, updated_at)
-           values (md5($1 || $2)::uuid, $3, $2, true, now())
+           values (md5($1 || $2::text)::uuid, $3, $2::uuid, true, now())
            on conflict (vendor_id, item_id) do update set is_active = true, updated_at = now()`,
           [key, itemId, vendorId],
         );
