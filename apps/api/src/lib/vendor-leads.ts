@@ -144,16 +144,17 @@ export async function rejectLeadForVendor(leadId: string, vendorId: string, reas
   return rows[0];
 }
 
-/**
- * Fans a new lead out to nearby online vendors. Vendors who mapped the lead's sub-category are
- * preferred; if nobody mapped it yet, every nearby vendor is notified so the lead is not lost.
- */
-export async function matchLeadToVendors(leadId: string) {
-  await ensureVendorSchema();
-  const pool = getPool();
+/** Online vendors who offer the lead's sub-category and are inside both the customer's search radius
+ * and their own service radius (0 = serves anywhere), nearest first. */
+export async function findVendorsForLead(leadId: string) {
   const dist = distanceSql("l.lat", "l.lng", "coalesce(v.live_lat, v.lat)", "coalesce(v.live_lng, v.lng)");
-  const { rows } = await pool.query(
-    `with l as (select * from public.leads where id = $1),
+  const { rows } = await getPool().query(
+    `with l as (
+            -- Older app builds always sent wholesaler+retailer+manufacturer, which silently excluded service pros.
+            select *, case when coalesce(cardinality(vendor_types), 0) = 0
+                             or vendor_types::text[] @> array['wholesaler','retailer','manufacturer']
+                           then null else vendor_types::text[] end as trade_filter
+              from public.leads where id = $1),
           mapped as (
             select distinct m.vendor_id from public.vendor_item_mappings m
               join public.catalog_items ci on ci.id = m.item_id
@@ -169,15 +170,23 @@ export async function matchLeadToVendors(leadId: string) {
         and coalesce(v.is_online, true)
         and (l.lat is null
              or (coalesce(v.live_lat, v.lat) is not null
-                 and (coalesce(v.service_radius_km, 10) = 0
-                      or ${dist} <= greatest(coalesce(v.service_radius_km, 10), coalesce(l.search_radius_km, 5)))))
-        and (not exists (select 1 from mapped) or v.user_id in (select vendor_id from mapped))
-        and (coalesce(cardinality(l.vendor_types), 0) = 0 or v.trade is null or lower(v.trade) = any(l.vendor_types))
+                 and ${dist} <= coalesce(l.search_radius_km, 5)
+                 and (coalesce(v.service_radius_km, 10) = 0 or ${dist} <= coalesce(v.service_radius_km, 10))))
+        and (l.sub_category_id is null or v.user_id in (select vendor_id from mapped))
+        and (l.trade_filter is null or v.trade is null or lower(v.trade) = any(l.trade_filter))
         and (not coalesce(l.verified_only, false) or coalesce(v.verified, false))
       order by case when l.lat is null or coalesce(v.live_lat, v.lat) is null then 1e9 else ${dist} end
       limit 25`,
     [leadId],
   );
+  return rows as { user_id: string; auto_accept: boolean }[];
+}
+
+/** Fans a new lead out to [findVendorsForLead]. */
+export async function matchLeadToVendors(leadId: string) {
+  await ensureVendorSchema();
+  const pool = getPool();
+  const rows = await findVendorsForLead(leadId);
   if (!rows.length) return { notified: 0, auto_accepted: 0 };
   await pool.query(
     `insert into public.lead_notifications (lead_id, vendor_id, status, auto_matched, sub_category_name)
@@ -185,11 +194,16 @@ export async function matchLeadToVendors(leadId: string) {
      on conflict (lead_id, vendor_id) do nothing`,
     [leadId, rows.map((r) => r.user_id)],
   );
-  for (const r of rows.filter((x) => !x.auto_accept)) {
-    void sendLeadPushToVendorInternal({ vendor_id: r.user_id, lead_id: leadId }).catch((err) =>
-      console.warn("[match] push", err instanceof Error ? err.message : err),
-    );
-  }
+  // Awaited: on serverless, work left running after the response may never finish.
+  await Promise.all(
+    rows
+      .filter((x) => !x.auto_accept)
+      .map((r) =>
+        sendLeadPushToVendorInternal({ vendor_id: r.user_id, lead_id: leadId }).catch((err) =>
+          console.warn("[match] push", err instanceof Error ? err.message : err),
+        ),
+      ),
+  );
   let autoAccepted = 0;
   for (const r of rows.filter((x) => x.auto_accept)) {
     try {
