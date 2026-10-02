@@ -66,6 +66,66 @@ export async function chatContext(leadId: string, me: string, peerHint?: string 
   throw new ChatError(403, "Accept the lead to chat with the customer");
 }
 
+/** Coins a vendor pays to reply to a customer who messaged them directly from their profile (admin setting `chat_credit_coins`). */
+export async function chatCreditCost(): Promise<number> {
+  try {
+    const { rows } = await q(`select value from public.app_settings where key = 'chat_credit_coins'`);
+    const raw = rows[0]?.value;
+    const n = Number(raw != null && typeof raw === "object" ? (raw as { coins?: unknown }).coins : raw);
+    return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Direct profile chats ("shop" leads) are free for the customer; the vendor pays once per customer to reply. */
+export function isDirectChat(lead: ChatLead) {
+  return lead.source === "shop";
+}
+
+/** Whether this vendor already paid (or sent anything) in this thread, plus the price. Only meaningful for direct chats. */
+export async function chatUnlockState(ctx: ChatContext) {
+  if (ctx.role !== "vendor" || !isDirectChat(ctx.lead)) return null;
+  const cost = await chatCreditCost();
+  const { rows } = await q(`select 1 from public.lead_messages where lead_id = $1 and sender_id = $2 limit 1`, [ctx.lead.id, ctx.me]);
+  return { cost, paid: rows.length > 0 || cost === 0 };
+}
+
+/** Charges the vendor's LeadX coins before their first reply in a direct chat. Throws 402 when the wallet is short. */
+export async function chargeChatCredit(ctx: ChatContext) {
+  const state = await chatUnlockState(ctx);
+  if (!state || state.paid) return { charged: 0 };
+  const client = await getPool().connect();
+  try {
+    await client.query("begin");
+    await client.query(`insert into public.vendor_wallets (vendor_id) values ($1) on conflict (vendor_id) do nothing`, [ctx.me]);
+    const w = await client.query(`select leadx_coins from public.vendor_wallets where vendor_id = $1 for update`, [ctx.me]);
+    const have = Number(w.rows[0]?.leadx_coins ?? 0);
+    if (have < state.cost) {
+      await client.query("rollback");
+      throw new ChatError(402, `Replying to a new customer costs ${state.cost} LeadX ${state.cost === 1 ? "coin" : "coins"}. Add coins to chat.`);
+    }
+    await client.query(
+      `update public.vendor_wallets
+          set leadx_coins = coalesce(leadx_coins, 0) - $2, lifetime_coins_used = coalesce(lifetime_coins_used, 0) + $2, updated_at = now()
+        where vendor_id = $1`,
+      [ctx.me, state.cost],
+    );
+    await client.query(
+      `insert into public.wallet_transactions (vendor_id, user_id, amount_inr, kind, purpose, direction, coins, description, ref, wallet_kind, status)
+       values ($1, $1, 0, 'debit', 'chat_unlock', 'debit', $2, $3, $4, 'leadx', 'success')`,
+      [ctx.me, state.cost, `Chat with ${ctx.lead.customer_name ?? "customer"}`, ctx.lead.id],
+    );
+    await client.query("commit");
+    return { charged: state.cost };
+  } catch (err) {
+    await client.query("rollback").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** SQL filter for the messages of one customer↔vendor pair ($1 lead, $2 vendor, $3 customer). */
 export const PAIR_FILTER = `m.lead_id = $1 and (
   m.sender_id = $2 or m.recipient_id = $2 or (m.sender_id = $3 and m.recipient_id is null))`;

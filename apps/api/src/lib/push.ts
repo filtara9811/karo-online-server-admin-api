@@ -120,7 +120,7 @@ async function getAccessToken(sa: ServiceAccount): Promise<string> {
   return j.access_token;
 }
 
-/** Android channel ids must match the app: lead → lead_alerts_v3 (rings), message → chat_messages, default → default. */
+/** Android channel ids must match the app: lead → lead_alerts_v5 (rings), message → chat_messages, default → default. */
 export type PushChannel = "lead" | "message" | "default";
 
 async function sendOne(opts: {
@@ -136,6 +136,8 @@ async function sendOne(opts: {
   channel?: PushChannel;
   tag?: string;
   extraData?: Record<string, string>;
+  /** Android lead alerts are sent as data-only so the app can draw its own ringing accept/reject alert even when killed. */
+  dataOnly?: boolean;
 }): Promise<{ ok: boolean; status: number; error?: string }> {
   const channel = opts.channel ?? (opts.highPriority ? "lead" : "default");
   const isHigh = channel !== "default";
@@ -147,7 +149,7 @@ async function sendOne(opts: {
       ttl: rings ? "60s" : "3600s",
       ...(opts.tag ? { collapse_key: opts.tag } : {}),
       notification: {
-        channel_id: rings ? "lead_alerts_v3" : channel === "message" ? "chat_messages" : "default",
+        channel_id: rings ? "lead_alerts_v5" : channel === "message" ? "chat_messages" : "default",
         sound: rings ? "lead_ring" : "default",
         notification_priority: rings ? "PRIORITY_MAX" : isHigh ? "PRIORITY_HIGH" : "PRIORITY_DEFAULT",
         default_vibrate_timings: !rings,
@@ -199,6 +201,12 @@ async function sendOne(opts: {
       ...(opts.imageUrl ? { image: opts.imageUrl } : {}),
     },
   };
+  if (opts.dataOnly) {
+    delete message.notification;
+    delete (message.android as { notification?: unknown }).notification;
+    delete message.apns;
+    delete message.webpush;
+  }
   const r = await fetch(`https://fcm.googleapis.com/v1/projects/${opts.projectId}/messages:send`, {
     method: "POST",
     headers: {
@@ -267,6 +275,7 @@ export async function pushToUser(opts: {
       channel: opts.channel,
       tag: opts.tag,
       extraData: opts.extraData,
+      dataOnly: (opts.channel ?? (opts.highPriority ? "lead" : "default")) === "lead" && tk.platform === "android",
     });
     if (r.ok) okCount += 1;
     results.push({ token: tk.token, platform: tk.platform, ...r });
@@ -298,11 +307,14 @@ export async function sendLeadPushToVendorInternal(data: { vendor_id: string; le
 
   const { data: notif } = await admin
     .from("lead_notifications")
-    .select("id")
+    .select("id, created_at, auto_accept_at")
     .eq("lead_id", data.lead_id)
     .eq("vendor_id", data.vendor_id)
     .maybeSingle();
   if (!notif) return { ok: false, reason: "vendor_not_targeted" as const };
+  const expiresAt = notif.auto_accept_at
+    ? new Date(notif.auto_accept_at as string)
+    : new Date(new Date((notif.created_at as string) ?? Date.now()).getTime() + 15_000);
 
   const [{ data: cust }, { data: cat }] = await Promise.all([
     lead.customer_id
@@ -320,6 +332,9 @@ export async function sendLeadPushToVendorInternal(data: { vendor_id: string; le
 
   const last4 = lead.customer_phone ? String(lead.customer_phone).replace(/\D/g, "").slice(-4) : "";
   const body = `${lead.customer_name ?? "Customer"} • ${lead.sub_category_name}${last4 ? ` • •••• ${last4}` : ""}`;
+  const { data: catCost } = lead.sub_category_id
+    ? await admin.from("categories").select("lead_cost_coins").eq("id", lead.sub_category_id).maybeSingle()
+    : { data: null };
   return pushToUser({
     userId: data.vendor_id,
     title: "🔔 New Lead — 15s to respond",
@@ -331,6 +346,12 @@ export async function sendLeadPushToVendorInternal(data: { vendor_id: string; le
     extraData: {
       kind: "lead_alert",
       lead_id: lead.id as string,
+      notification_id: String(notif.id),
+      expires_at: expiresAt.toISOString(),
+      customer_name: String(lead.customer_name ?? "Customer"),
+      service: String(lead.sub_category_name ?? "Service"),
+      ...(lead.address ? { address: String(lead.address).slice(0, 120) } : {}),
+      ...(catCost?.lead_cost_coins != null ? { cost: String(catCost.lead_cost_coins) } : {}),
       ...(iconUrl ? { icon: iconUrl } : {}),
       ...(heroImage ? { image: heroImage } : {}),
     },

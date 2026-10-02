@@ -231,6 +231,7 @@ leadsRouter.get(
       `select v.user_id as vendor_id, v.business_name, v.owner_name, v.avatar_url, v.cover_image_url,
               coalesce(v.verified, false) as verified, coalesce(v.is_premium, false) as is_premium,
               v.whatsapp as phone, v.whatsapp, v.trade, n.responded_at as accepted_at, n.quoted_price,
+              coalesce(v.live_lat, v.lat) as lat, coalesce(v.live_lng, v.lng) as lng, v.rating_avg, v.rating_count, v.is_online,
               case when $2::float8 is null or coalesce(v.live_lat, v.lat) is null then null else ${dist} end as distance_km,
               pr.price_min, pr.price_max
          from public.vendors v
@@ -257,6 +258,9 @@ leadsRouter.get(
         search_radius_km: lead.search_radius_km,
         approved_vendor_id: lead.customer_approved_vendor_id,
         created_at: lead.created_at,
+        lat: lead.lat,
+        lng: lead.lng,
+        address: lead.address,
       },
       notified: counts[0]?.notified ?? 0,
       pending: counts[0]?.pending ?? 0,

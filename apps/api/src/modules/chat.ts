@@ -10,6 +10,8 @@ import {
   approveVendor,
   PROGRESS_LABELS,
   chatContext,
+  chatUnlockState,
+  chargeChatCredit,
   displayName,
   insertMessage,
   pairStage,
@@ -141,7 +143,7 @@ chatRouter.get(
           )
         : none,
     ]);
-    const [msgRows, presRows, peerRows, upi, peerList, ratingRows, stage] = await Promise.all([
+    const [msgRows, presRows, peerRows, upi, peerList, ratingRows, stage, unlock] = await Promise.all([
       vendorId
         ? q(
             `select * from (select m.* from public.lead_messages m where ${PAIR_FILTER} order by m.created_at desc limit 500) x
@@ -188,6 +190,7 @@ chatRouter.get(
         ? q(`select stars, comment, tags, created_at from public.vendor_reviews where lead_id = $1 and vendor_id = $2`, [lead.id, vendorId])
         : none,
       pairStage(ctx),
+      chatUnlockState(ctx),
     ]);
 
     const messages = msgRows.rows.map((m) => shapeMessage(m, me));
@@ -242,6 +245,7 @@ chatRouter.get(
         source: lead.source,
       },
       ...stage,
+      chat_unlock: unlock,
       peer,
       peers,
       rating,
@@ -281,6 +285,7 @@ chatRouter.post(
     const m = parsed.data;
     const vendorOnly = m.kind === "quote" || m.kind === "payment" || m.kind === "product";
     if (vendorOnly && ctx.role !== "vendor") return fail(res, 403, "Only the vendor can send this");
+    if (ctx.role === "vendor") await chargeChatCredit(ctx);
 
     let row;
     if (m.kind === "text") row = await insertMessage(ctx, { kind: "text", body: m.body });

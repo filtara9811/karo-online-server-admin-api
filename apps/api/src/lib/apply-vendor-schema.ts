@@ -226,6 +226,8 @@ const STATEMENTS = [
   `create index if not exists shop_orders_vendor_idx on public.shop_orders (vendor_id, created_at desc)`,
   `create index if not exists shop_orders_customer_idx on public.shop_orders (customer_id, created_at desc)`,
   `create unique index if not exists digital_shops_slug_uq on public.digital_shops (lower(slug))`,
+  // Default price for a vendor's first reply in a profile chat; editable in Admin → LeadX Market.
+  `insert into public.app_settings (key, value) values ('chat_credit_coins', '2'::jsonb) on conflict (key) do nothing`,
 ];
 
 let applied: Promise<void> | null = null;

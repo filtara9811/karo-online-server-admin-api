@@ -318,6 +318,67 @@ adminRouter.post(
   }),
 );
 
+const VendorCoinsSchema = z.object({
+  coins: z
+    .number()
+    .int()
+    .min(-100000)
+    .max(100000)
+    .refine((n) => n !== 0, "coins must be non-zero"),
+  note: z.string().trim().max(200).optional(),
+});
+
+/** Grant (positive) or deduct (negative) LeadX coins on a vendor wallet — admin/testing helper. */
+adminRouter.post(
+  "/vendors/:userId/coins",
+  asyncHandler(async (req, res) => {
+    const uid = z.string().uuid().safeParse(req.params.userId);
+    if (!uid.success) return fail(res, 400, "Invalid user id");
+    const parsed = VendorCoinsSchema.safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const { coins, note } = parsed.data;
+    const vendorId = uid.data;
+
+    const { rows: vendorRows } = await getPool().query(
+      `select user_id, business_name from public.vendors where user_id = $1`,
+      [vendorId],
+    );
+    const vendor = vendorRows[0];
+    if (!vendor) return fail(res, 404, "Vendor not found");
+
+    const direction = coins > 0 ? "credit" : "debit";
+    const client = await getPool().connect();
+    try {
+      await client.query("begin");
+      await client.query(`insert into public.vendor_wallets (vendor_id) values ($1) on conflict (vendor_id) do nothing`, [vendorId]);
+      const w = await client.query(
+        `update public.vendor_wallets
+            set leadx_coins = greatest(0, coalesce(leadx_coins, 0) + $2),
+                updated_at = now()
+          where vendor_id = $1
+          returning leadx_coins`,
+        [vendorId, coins],
+      );
+      await client.query(
+        `insert into public.wallet_transactions (vendor_id, user_id, amount_inr, kind, purpose, direction, coins, description, wallet_kind, status)
+         values ($1, $1, 0, $2, 'admin_adjustment', $2, $3, $4, 'leadx', 'success')`,
+        [vendorId, direction, Math.abs(coins), note || "Admin adjustment"],
+      );
+      await client.query("commit");
+      return ok(res, {
+        vendor_id: vendorId,
+        business_name: vendor.business_name ?? null,
+        coins_left: Number(w.rows[0]?.leadx_coins ?? 0),
+      });
+    } catch (e) {
+      await client.query("rollback").catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }),
+);
+
 adminRouter.post(
   "/kyc/:id/status",
   asyncHandler(async (req, res) => {
