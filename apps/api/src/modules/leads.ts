@@ -144,11 +144,25 @@ leadsRouter.get(
                 v.user_id as vendor_id,
                 coalesce(v.business_name, v.owner_name) as vendor_name,
                 v.avatar_url as vendor_avatar,
-                n.quoted_price::float as amount
+                n.quoted_price::float as amount,
+                cat.image_url as service_image,
+                cat.icon as service_icon,
+                coalesce((
+                  select jsonb_agg(jsonb_build_object(
+                    'id', v2.user_id,
+                    'name', coalesce(v2.business_name, v2.owner_name, 'Vendor'),
+                    'avatar', v2.avatar_url,
+                    'rating', v2.rating_avg,
+                    'online', coalesce(v2.is_online, false)
+                  ) order by (v2.user_id = l.customer_approved_vendor_id) desc nulls last, coalesce(v2.business_name, v2.owner_name))
+                  from public.vendors v2
+                  where v2.user_id = any(coalesce(l.accepted_vendor_ids, '{}'::uuid[]))
+                ), '[]'::jsonb) as offer_vendors
            from public.leads l
            left join public.vendors v
              on v.user_id = coalesce(l.customer_approved_vendor_id, case when array_length(l.accepted_vendor_ids, 1) = 1 then l.accepted_vendor_ids[1] end)
            left join public.lead_notifications n on n.lead_id = l.id and n.vendor_id = v.user_id
+           left join public.categories cat on cat.id = l.sub_category_id
           where l.customer_id = $1
           order by coalesce(l.updated_at, l.created_at) desc
           limit 200`,
@@ -229,6 +243,7 @@ leadsRouter.get(
     const dist = distanceSql("$2::float8", "$3::float8", "coalesce(v.live_lat, v.lat)", "coalesce(v.live_lng, v.lng)");
     const { rows: vendors } = await pool.query(
       `select v.user_id as vendor_id, v.business_name, v.owner_name, v.avatar_url, v.cover_image_url,
+              v.city, v.address,
               coalesce(v.verified, false) as verified, coalesce(v.is_premium, false) as is_premium,
               v.whatsapp as phone, v.whatsapp, v.trade, n.responded_at as accepted_at, n.quoted_price,
               coalesce(v.live_lat, v.lat) as lat, coalesce(v.live_lng, v.lng) as lng, v.rating_avg, v.rating_count, v.is_online,
@@ -257,6 +272,7 @@ leadsRouter.get(
         accepted_count: lead.accepted_count ?? vendors.length,
         search_radius_km: lead.search_radius_km,
         approved_vendor_id: lead.customer_approved_vendor_id,
+        is_marketplace: lead.is_marketplace === true,
         created_at: lead.created_at,
         lat: lead.lat,
         lng: lead.lng,

@@ -13,7 +13,7 @@ export async function getNearbyDigitalShops(data: z.infer<typeof NearbyShopsSche
   const { data: rows, error } = await admin
     .from("vendors")
     .select(
-      "id, business_name, owner_name, trade, deals_in, avatar_url, profile_photo_url, cover_image_url, cover_video_url, verified, is_online, status, is_blocked, lat, lng, live_lat, live_lng, location_updated_at, operation_mode, service_radius_km",
+      "id, user_id, business_name, owner_name, trade, deals_in, avatar_url, profile_photo_url, cover_image_url, cover_video_url, verified, is_online, status, is_blocked, lat, lng, live_lat, live_lng, location_updated_at, operation_mode, service_radius_km, rating_avg, rating_count, address, city, whatsapp",
     )
     .eq("is_blocked", false)
     .eq("status", "active");
@@ -63,6 +63,7 @@ export async function getNearbyDigitalShops(data: z.infer<typeof NearbyShopsSche
           : null;
       return {
         id: String(v.id),
+        user_id: v.user_id == null ? null : String(v.user_id),
         business_name: v.business_name ?? null,
         owner_name: v.owner_name ?? null,
         trade: v.trade ?? null,
@@ -75,6 +76,11 @@ export async function getNearbyDigitalShops(data: z.infer<typeof NearbyShopsSche
         lat,
         lng,
         km,
+        rating: Number(v.rating_avg ?? 0),
+        rating_count: Number(v.rating_count ?? 0),
+        address: (v.address ?? null) as string | null,
+        city: (v.city ?? null) as string | null,
+        phone: (v.whatsapp ?? null) as string | null,
         service_radius_km: Number(v.service_radius_km ?? 10),
       };
     })

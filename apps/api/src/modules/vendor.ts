@@ -499,7 +499,8 @@ vendorRouter.get(
     const { rows } = await q(
       `select l.*, c.lead_cost_coins
          from public.leads l left join public.categories c on c.id = l.sub_category_id
-        where l.status in ('placed', 'accepted')
+        where coalesce(l.is_marketplace, false)
+          and l.status in ('placed', 'accepted')
           and coalesce(l.accepted_count, 0) < coalesce(c.max_vendors_per_lead, l.max_slots, 3)
           and l.created_at > now() - interval '7 days'
           and l.customer_id is distinct from $1

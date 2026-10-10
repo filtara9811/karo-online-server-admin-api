@@ -185,12 +185,16 @@ export async function findVendorsForLead(leadId: string) {
   return rows as { user_id: string; auto_accept: boolean }[];
 }
 
-/** Fans a new lead out to [findVendorsForLead]. */
+/** Fans a new lead out to [findVendorsForLead]. When nobody is in range, the lead opens in the bazaar. */
 export async function matchLeadToVendors(leadId: string) {
   await ensureVendorSchema();
   const pool = getPool();
   const rows = await findVendorsForLead(leadId);
-  if (!rows.length) return { notified: 0, auto_accepted: 0 };
+  if (!rows.length) {
+    await pool.query(`update public.leads set is_marketplace = true, updated_at = now() where id = $1`, [leadId]);
+    return { notified: 0, auto_accepted: 0, marketplace: true };
+  }
+  await pool.query(`update public.leads set is_marketplace = false, updated_at = now() where id = $1 and coalesce(is_marketplace, false)`, [leadId]);
   await pool.query(
     `insert into public.lead_notifications (lead_id, vendor_id, status, auto_matched, sub_category_name)
      select $1, unnest($2::uuid[]), 'pending', true, (select sub_category_name from public.leads where id = $1)
@@ -216,5 +220,5 @@ export async function matchLeadToVendors(leadId: string) {
       console.warn("[match] auto-accept", err instanceof Error ? err.message : err);
     }
   }
-  return { notified: rows.length, auto_accepted: autoAccepted };
+  return { notified: rows.length, auto_accepted: autoAccepted, marketplace: false };
 }
