@@ -23,7 +23,8 @@ export function getPool() {
     pool = new Pool({
       connectionString,
       ssl: { rejectUnauthorized: false },
-      max: serverless ? 2 : 8,
+      // Local + DigitalOcean shared plans run out of slots fast if every process opens 8.
+      max: serverless ? 2 : Number(process.env.PG_POOL_MAX || 3),
       connectionTimeoutMillis: 15_000,
       idleTimeoutMillis: serverless ? 5_000 : 20_000,
       allowExitOnIdle: serverless,

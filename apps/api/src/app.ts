@@ -67,11 +67,35 @@ export function createApp() {
   );
   app.use(express.urlencoded({ extended: true }));
 
-  app.get("/health", (_req, res) => {
-    ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
+  async function healthPayload() {
+    let maintenance: unknown = null;
+    if (hasDatabase()) {
+      try {
+        const { getPool } = await import("./lib/pg-client.js");
+        const { rows } = await getPool().query(
+          `select value from public.app_settings where key = 'maintenance' limit 1`,
+        );
+        const v = rows[0]?.value;
+        if (v && typeof v === "object") {
+          const until = (v as { until?: string }).until;
+          if (until && new Date(until).getTime() > Date.now()) maintenance = v;
+        }
+      } catch {
+        /* ignore — health must stay cheap */
+      }
+    }
+    return {
+      status: maintenance ? "maintenance" : "up",
+      service_role: hasServiceRole(),
+      postgres: hasDatabase(),
+      maintenance,
+    };
+  }
+  app.get("/health", async (_req, res) => {
+    ok(res, await healthPayload());
   });
-  app.get("/v1/health", (_req, res) => {
-    ok(res, { status: "up", service_role: hasServiceRole(), postgres: hasDatabase() });
+  app.get("/v1/health", async (_req, res) => {
+    ok(res, await healthPayload());
   });
 
   app.use("/v1/auth", authRouter);

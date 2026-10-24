@@ -265,6 +265,17 @@ leadsRouter.get(
          from public.lead_notifications where lead_id = $1`,
       [id.data],
     );
+    let progress: unknown[] = [];
+    try {
+      const found = await pool.query(
+        `select vendor_id, status_key, created_at from public.vendor_status_updates
+          where lead_id = $1 and status_key is not null order by created_at`,
+        [id.data],
+      );
+      progress = found.rows;
+    } catch {
+      progress = [];
+    }
     return ok(res, {
       lead: {
         id: lead.id,
@@ -281,6 +292,7 @@ leadsRouter.get(
       notified: counts[0]?.notified ?? 0,
       pending: counts[0]?.pending ?? 0,
       vendors,
+      progress,
     });
   }),
 );
