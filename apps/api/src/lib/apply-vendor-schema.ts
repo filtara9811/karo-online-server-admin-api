@@ -228,6 +228,36 @@ const STATEMENTS = [
   `create unique index if not exists digital_shops_slug_uq on public.digital_shops (lower(slug))`,
   // Default price for a vendor's first reply in a profile chat; editable in Admin → LeadX Market.
   `insert into public.app_settings (key, value) values ('chat_credit_coins', '2'::jsonb) on conflict (key) do nothing`,
+
+  // Staff signup — handler writes email, user_id, status, note (table was name/phone only).
+  `create table if not exists public.staff_signup_requests (
+    id uuid primary key default gen_random_uuid(),
+    name text,
+    phone text,
+    created_at timestamptz default now())`,
+  ...["email text", "user_id uuid", "status text default 'pending'", "note text"].map(
+    (c) => `alter table public.staff_signup_requests add column if not exists ${c}`,
+  ),
+  `create index if not exists staff_signup_requests_user_idx on public.staff_signup_requests (user_id, created_at desc)`,
+  `create index if not exists staff_signup_requests_status_idx on public.staff_signup_requests (status, created_at desc)`,
+
+  // Vendor card/OCR scan history — handler writes kinds/extracted/confidence (table was code-only).
+  `create table if not exists public.vendor_scan_history (
+    id uuid primary key default gen_random_uuid(),
+    vendor_id uuid,
+    code text,
+    created_at timestamptz default now())`,
+  ...[
+    "user_id uuid",
+    "kinds text[] default '{}'",
+    "thumbnail text",
+    "extracted jsonb default '{}'::jsonb",
+    "confidence numeric",
+    "field_confidence jsonb",
+    "status text default 'complete'",
+  ].map((c) => `alter table public.vendor_scan_history add column if not exists ${c}`),
+  `create index if not exists vendor_scan_history_user_idx on public.vendor_scan_history (user_id, created_at desc)`,
+  `create index if not exists vendor_scan_history_created_idx on public.vendor_scan_history (created_at desc)`,
 ];
 
 let applied: Promise<void> | null = null;

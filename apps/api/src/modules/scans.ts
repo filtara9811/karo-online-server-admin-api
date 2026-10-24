@@ -20,7 +20,11 @@ scansRouter.post(
   asyncHandler(async (req, res) => {
     const parsed = SaveScanSchema.safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    return ok(res, await saveScanHistory(req.userClient!, req.userId!, parsed.data));
+    try {
+      return ok(res, await saveScanHistory(req.userClient!, req.userId!, parsed.data));
+    } catch (e) {
+      return fail(res, 400, e instanceof Error ? e.message : "Could not save scan");
+    }
   }),
 );
 
@@ -29,7 +33,11 @@ scansRouter.delete(
   asyncHandler(async (req, res) => {
     const parsed = z.object({ id: z.string().uuid() }).safeParse({ ...req.body, ...req.query });
     if (!parsed.success) return zodFail(res, parsed.error);
-    return ok(res, await deleteScanHistory(req.userClient!, parsed.data.id));
+    try {
+      return ok(res, await deleteScanHistory(req.userClient!, parsed.data.id));
+    } catch (e) {
+      return fail(res, 400, e instanceof Error ? e.message : "Could not delete scan");
+    }
   }),
 );
 

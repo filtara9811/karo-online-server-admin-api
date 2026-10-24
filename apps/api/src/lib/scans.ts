@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { DbClient } from "./pg-client.js";
+import { ensureVendorSchema } from "./apply-vendor-schema.js";
 
 export const SaveScanSchema = z.object({
   kinds: z.array(z.string()).min(1).max(10),
@@ -10,7 +11,44 @@ export const SaveScanSchema = z.object({
   status: z.enum(["complete", "pending_ocr"]).optional(),
 });
 
+const TRACK = [
+  "business_name",
+  "owner_name",
+  "mobile",
+  "address",
+  "city",
+  "state",
+  "pincode",
+  "gstin",
+  "email",
+  "shop_type_hint",
+] as const;
+
+function emptyInsights() {
+  const fieldFillRate: Record<string, number> = {};
+  for (const k of TRACK) fieldFillRate[k] = 0;
+  return {
+    total: 0,
+    last7d: 0,
+    last30d: 0,
+    today: 0,
+    avgConfidence: null as number | null,
+    emptyRate: 0,
+    fieldFillRate,
+    recent: [] as Array<{
+      id: string;
+      created_at: string;
+      thumbnail: string | null;
+      confidence: number | null;
+      business_name: string | null;
+      mobile: string | null;
+      kinds: string[];
+    }>,
+  };
+}
+
 export async function listScanHistory(sb: DbClient) {
+  await ensureVendorSchema();
   const { data, error } = await sb
     .from("vendor_scan_history")
     .select("id, kinds, thumbnail, extracted, confidence, field_confidence, status, created_at")
@@ -28,6 +66,7 @@ export async function saveScanHistory(
   userId: string,
   data: z.infer<typeof SaveScanSchema>,
 ) {
+  await ensureVendorSchema();
   const { data: row, error } = await sb
     .from("vendor_scan_history")
     .insert({
@@ -41,20 +80,20 @@ export async function saveScanHistory(
     })
     .select("id")
     .single();
-  if (error) {
-    console.warn("[scan-history] save failed:", error.message);
-    return { id: null as string | null };
-  }
+  if (error) throw new Error(error.message);
+  if (!row?.id) throw new Error("Scan history insert returned no id");
   return { id: row.id as string };
 }
 
 export async function deleteScanHistory(sb: DbClient, id: string) {
+  await ensureVendorSchema();
   const { error } = await sb.from("vendor_scan_history").delete().eq("id", id);
   if (error) throw new Error(error.message);
   return { ok: true };
 }
 
 export async function getScanInsights(sb: DbClient, userId: string) {
+  await ensureVendorSchema();
   try {
     const { data: isAdmin } = await sb.rpc("has_role", { _user_id: userId, _role: "admin" });
     if (isAdmin === false) throw new Error("Forbidden");
@@ -68,38 +107,8 @@ export async function getScanInsights(sb: DbClient, userId: string) {
     .order("created_at", { ascending: false })
     .limit(500);
   if (error) {
-    return {
-      total: 3,
-      last7d: 2,
-      last30d: 3,
-      today: 1,
-      avgConfidence: 0.82,
-      emptyRate: 0.1,
-      fieldFillRate: {
-        business_name: 0.9,
-        owner_name: 0.7,
-        mobile: 0.85,
-        address: 0.6,
-        city: 0.5,
-        state: 0.4,
-        pincode: 0.4,
-        gstin: 0.2,
-        email: 0.3,
-        shop_type_hint: 0.5,
-      },
-      recent: [
-        {
-          id: "seed-1",
-          created_at: new Date().toISOString(),
-          thumbnail: null,
-          confidence: 0.88,
-          business_name: "Karo Maison",
-          mobile: "9999999999",
-          kinds: ["card"],
-        },
-      ],
-      seeded: true,
-    };
+    console.warn("[scan-insights] query failed:", error.message);
+    return emptyInsights();
   }
 
   const rows = (data ?? []) as Array<{
@@ -122,18 +131,6 @@ export async function getScanInsights(sb: DbClient, userId: string) {
   let confCount = 0;
   let empty = 0;
   const fieldHit: Record<string, number> = {};
-  const TRACK = [
-    "business_name",
-    "owner_name",
-    "mobile",
-    "address",
-    "city",
-    "state",
-    "pincode",
-    "gstin",
-    "email",
-    "shop_type_hint",
-  ];
   for (const k of TRACK) fieldHit[k] = 0;
 
   for (const r of rows) {
@@ -145,8 +142,8 @@ export async function getScanInsights(sb: DbClient, userId: string) {
     let hasAny = false;
     for (const k of TRACK) {
       const v = ex[k];
-      const ok = Array.isArray(v) ? v.length > 0 : Boolean(v);
-      if (ok) {
+      const filled = Array.isArray(v) ? v.length > 0 : Boolean(v);
+      if (filled) {
         fieldHit[k]++;
         hasAny = true;
       }

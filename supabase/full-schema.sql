@@ -545,6 +545,10 @@ create table if not exists public.staff_signup_requests (
   id uuid primary key default gen_random_uuid(),
   name text,
   phone text,
+  email text,
+  user_id uuid,
+  status text default 'pending',
+  note text,
   created_at timestamptz default now()
 );
 
@@ -592,7 +596,14 @@ create table if not exists public.kyc_verifications (
 create table if not exists public.vendor_scan_history (
   id uuid primary key default gen_random_uuid(),
   vendor_id uuid,
+  user_id uuid,
   code text,
+  kinds text[] default '{}',
+  thumbnail text,
+  extracted jsonb default '{}'::jsonb,
+  confidence numeric,
+  field_confidence jsonb,
+  status text default 'complete',
   created_at timestamptz default now()
 );
 

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/respond.js";
 import { hasServiceRole } from "../config/env.js";
+import { ensureVendorSchema } from "../lib/apply-vendor-schema.js";
 import { getServiceRoleClient } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 
@@ -92,6 +93,7 @@ staffRouter.post(
 staffRouter.post(
   "/signup",
   asyncHandler(async (req, res) => {
+    await ensureVendorSchema();
     const parsed = z
       .object({
         name: z.string().min(2).max(100),
@@ -102,7 +104,10 @@ staffRouter.post(
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const { error } = await req.userClient!.from("staff_signup_requests").insert({
-      ...parsed.data,
+      name: parsed.data.name,
+      email: parsed.data.email,
+      phone: parsed.data.phone ?? null,
+      note: parsed.data.note ?? null,
       user_id: req.userId,
       status: "pending",
     });
