@@ -135,6 +135,7 @@ const BusinessSchema = z.object({
   profile_photo_url: optStr(1000),
   cover_image_url: optStr(1000),
   gallery_urls: z.array(z.string().max(1000)).max(12).optional(),
+  staff_code: z.string().trim().max(20).optional(),
 });
 
 vendorRouter.post(
@@ -142,7 +143,7 @@ vendorRouter.post(
   guard(async (req, res) => {
     const parsed = BusinessSchema.safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const b = parsed.data;
+    const { staff_code, ...b } = parsed.data;
     const uid = req.userId!;
     const cols = Object.keys(b).filter((k) => (b as Record<string, unknown>)[k] !== undefined);
     const values = cols.map((c) => (b as Record<string, unknown>)[c]);
@@ -157,6 +158,10 @@ vendorRouter.post(
       [uid, ...values],
     );
     await q(`insert into public.vendor_wallets (vendor_id) values ($1) on conflict (vendor_id) do nothing`, [uid]);
+    const { attributeVendorJoin } = await import("../lib/staff-ops.js");
+    await attributeVendorJoin(uid, b.whatsapp, staff_code).catch((err) => {
+      console.warn("[vendor-join] staff attribution", err instanceof Error ? err.message : err);
+    });
     return ok(res, { vendor: rows[0] }, 201);
   }),
 );

@@ -7,6 +7,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import { seedSmsGateways } from "../lib/seed-admin.js";
 import { getPool } from "../lib/pg-client.js";
+import { assignTask, decideWithdrawal, grantStaff, listStaffWithdrawals, reviewTask } from "../lib/staff-ops.js";
 import { settle } from "../lib/payments.js";
 import { FcmConfigSchema, getFcmStatus, pushToUser, saveFcmConfig } from "../lib/push.js";
 import {
@@ -169,7 +170,92 @@ adminRouter.get(
       if (rErr) return fail(res, 400, rErr.message);
       if (pErr) return fail(res, 400, pErr.message);
     }
-    return ok(res, { roles: roles ?? [], profiles: profiles ?? [] });
+    return ok(res, { roles: roles ?? [], profiles: profiles ?? [], staff: profiles ?? [] });
+  }),
+);
+
+adminRouter.post(
+  "/staff/grant",
+  asyncHandler(async (req, res) => {
+    const parsed = z
+      .object({
+        phone: z.string().min(10).max(16),
+        name: z.string().max(120).optional(),
+        zone: z.string().max(120).optional(),
+        role_label: z.string().max(80).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const result = await grantStaff({
+      phone: parsed.data.phone,
+      name: parsed.data.name,
+      zone: parsed.data.zone,
+      roleLabel: parsed.data.role_label,
+      approvedBy: req.userId,
+    });
+    if (!result.ok) return fail(res, 404, result.error);
+    return ok(res, result, 201);
+  }),
+);
+
+adminRouter.post(
+  "/staff/tasks",
+  asyncHandler(async (req, res) => {
+    const parsed = z
+      .object({
+        staff_id: z.string().uuid(),
+        title: z.string().min(2).max(160),
+        task_type: z.enum(["onboard", "kyc", "standee", "call", "survey", "custom"]),
+        amount_inr: z.number().min(0).max(100000).optional(),
+        note: z.string().max(500).optional(),
+        due_label: z.string().max(40).optional(),
+        shop_name: z.string().max(160).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const defaults: Record<string, number> = { onboard: 200, kyc: 50, standee: 50 };
+    const task = await assignTask({
+      staffId: parsed.data.staff_id,
+      title: parsed.data.title,
+      taskType: parsed.data.task_type,
+      amountInr: parsed.data.amount_inr ?? defaults[parsed.data.task_type] ?? 0,
+      note: parsed.data.note,
+      dueLabel: parsed.data.due_label,
+      shopName: parsed.data.shop_name,
+      assignedBy: req.userId,
+    });
+    return ok(res, { task }, 201);
+  }),
+);
+
+adminRouter.post(
+  "/staff/tasks/:id/review",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const body = z.object({ approved: z.boolean() }).safeParse(req.body);
+    if (!id.success || !body.success) return fail(res, 400, "Invalid task review");
+    const result = await reviewTask(id.data, body.data.approved);
+    if (!result.ok) return fail(res, 404, result.error);
+    return ok(res, result);
+  }),
+);
+
+adminRouter.get(
+  "/staff/withdrawals",
+  asyncHandler(async (_req, res) => {
+    return ok(res, { withdrawals: await listStaffWithdrawals() });
+  }),
+);
+
+adminRouter.post(
+  "/staff/withdrawals/:id/:action",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const action = z.enum(["paid", "rejected"]).safeParse(req.params.action);
+    if (!id.success || !action.success) return fail(res, 400, "Invalid withdrawal action");
+    const result = await decideWithdrawal(id.data, action.data, req.userId);
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result);
   }),
 );
 

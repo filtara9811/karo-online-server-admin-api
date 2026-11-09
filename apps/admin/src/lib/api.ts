@@ -84,6 +84,7 @@ export function asList(data: unknown): Record<string, unknown>[] {
       "customers",
       "vendors",
       "staff",
+      "withdrawals",
       "users",
       "gateways",
       "providers",

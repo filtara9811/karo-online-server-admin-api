@@ -175,6 +175,12 @@ export async function setVendorApproval(sb: DbClient, userId: string, approved: 
     })
     .eq("user_id", userId);
   if (error) throw new Error(error.message);
+  if (approved) {
+    const { payVendorStaffBonus } = await import("./staff-ops.js");
+    await payVendorStaffBonus(userId).catch((err) => {
+      console.warn("[staff-bonus]", err instanceof Error ? err.message : err);
+    });
+  }
   return { ok: true };
 }
 

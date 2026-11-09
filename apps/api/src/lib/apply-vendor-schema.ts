@@ -258,6 +258,103 @@ const STATEMENTS = [
   ].map((c) => `alter table public.vendor_scan_history add column if not exists ${c}`),
   `create index if not exists vendor_scan_history_user_idx on public.vendor_scan_history (user_id, created_at desc)`,
   `create index if not exists vendor_scan_history_created_idx on public.vendor_scan_history (created_at desc)`,
+
+  `create table if not exists public.user_roles (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid,
+    role text,
+    created_at timestamptz default now())`,
+  `create unique index if not exists user_roles_user_role_uidx on public.user_roles (user_id, role)`,
+
+  `create table if not exists public.staff_profiles (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid unique,
+    name text,
+    phone text,
+    created_at timestamptz default now())`,
+  ...[
+    "email text",
+    "employee_code text",
+    "zone text",
+    "role_label text default 'Field Sales'",
+    "staff_status text default 'active'",
+    "payout_model text default 'per_task'",
+    "monthly_salary_inr numeric default 0",
+    "on_duty boolean default false",
+    "duty_started_at timestamptz",
+    "upi_id text",
+    "joined_at timestamptz",
+    "approved_by uuid",
+    "approved_at timestamptz",
+  ].map((c) => `alter table public.staff_profiles add column if not exists ${c}`),
+  `create unique index if not exists staff_profiles_employee_code_uidx on public.staff_profiles (employee_code) where employee_code is not null`,
+
+  `create table if not exists public.staff_tasks (
+    id uuid primary key default gen_random_uuid(),
+    staff_id uuid,
+    title text,
+    status text default 'assigned',
+    proof_urls text[] default '{}',
+    assigned_at timestamptz default now(),
+    submitted_at timestamptz,
+    created_at timestamptz default now())`,
+  ...[
+    "description text",
+    "task_type text default 'custom'",
+    "amount_inr numeric default 0",
+    "due_label text",
+    "admin_note text",
+    "shop_name text",
+    "bonus_paid boolean default false",
+    "assigned_by uuid",
+  ].map((c) => `alter table public.staff_tasks add column if not exists ${c}`),
+
+  `create table if not exists public.staff_wallets (
+    id uuid primary key default gen_random_uuid(),
+    staff_id uuid unique,
+    balance_inr numeric default 0,
+    updated_at timestamptz default now())`,
+  ...["lifetime_earned numeric default 0", "lifetime_withdrawn numeric default 0"].map(
+    (c) => `alter table public.staff_wallets add column if not exists ${c}`,
+  ),
+
+  `create table if not exists public.staff_wallet_ledger (
+    id uuid primary key default gen_random_uuid(),
+    staff_id uuid,
+    amount_inr numeric,
+    note text,
+    created_at timestamptz default now())`,
+  `alter table public.staff_wallet_ledger add column if not exists kind text default 'adjustment'`,
+
+  `create table if not exists public.staff_withdrawal_requests (
+    id uuid primary key default gen_random_uuid(),
+    staff_id uuid,
+    amount_inr numeric,
+    upi_id text,
+    status text default 'pending',
+    created_at timestamptz default now())`,
+  ...["admin_note text", "reviewed_at timestamptz", "reviewed_by uuid"].map(
+    (c) => `alter table public.staff_withdrawal_requests add column if not exists ${c}`,
+  ),
+
+  `create table if not exists public.staff_onboardings (
+    id uuid primary key default gen_random_uuid(),
+    staff_id uuid not null,
+    business_name text not null,
+    owner_name text,
+    phone text not null,
+    category text,
+    address text,
+    lat numeric,
+    lng numeric,
+    source text default 'manual',
+    status text default 'pending',
+    vendor_user_id uuid,
+    created_at timestamptz default now())`,
+  `create index if not exists staff_onboardings_staff_idx on public.staff_onboardings (staff_id, created_at desc)`,
+
+  `alter table public.vendors add column if not exists onboarded_by_staff_id uuid`,
+  `alter table public.vendors add column if not exists staff_bonus_paid boolean default false`,
 ];
 
 let applied: Promise<void> | null = null;

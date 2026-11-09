@@ -7,9 +7,26 @@ import { GoldButton, GoldCard, PageHeader } from "@/components/admin/AdminLayout
 
 export default function StaffPage() {
   const [q, setQ] = useState("");
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+  const [zone, setZone] = useState("");
+  const [role, setRole] = useState("Field Sales");
+  const [taskStaff, setTaskStaff] = useState("");
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskType, setTaskType] = useState("onboard");
+  const [busy, setBusy] = useState("");
+  const [note, setNote] = useState("");
   const staffQ = useQuery({
     queryKey: ["admin-staff"],
     queryFn: async () => asList(await apiFetch("/v1/admin/staff")),
+  });
+  const tasksQ = useQuery({
+    queryKey: ["admin-staff-tasks"],
+    queryFn: async () => asList(await apiFetch("/v1/admin/table/staff_tasks")),
+  });
+  const withdrawalsQ = useQuery({
+    queryKey: ["admin-staff-withdrawals"],
+    queryFn: async () => asList(await apiFetch("/v1/admin/staff/withdrawals")),
   });
   const rolesQ = useQuery({
     queryKey: ["admin-table", "user_roles"],
@@ -64,6 +81,139 @@ export default function StaffPage() {
           />
         </div>
       )}
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Grant staff access</p>
+        <p className="text-xs text-[#f5d97a]/70 mb-3">The person must already have a Karo login. This creates their staff profile. They can then switch to Staff in the app.</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Mobile" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={zone} onChange={(e) => setZone(e.target.value)} placeholder="Zone / area" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+        </div>
+        <GoldButton
+          className="mt-3"
+          onClick={async () => {
+            setBusy("grant");
+            setNote("");
+            try {
+              const data = await apiFetch<{ staff?: { employee_code?: string; name?: string } }>("/v1/admin/staff/grant", {
+                method: "POST",
+                body: JSON.stringify({ phone, name, zone, role_label: role }),
+              });
+              setNote(`Staff profile ready${data.staff?.employee_code ? ` · ${data.staff.employee_code}` : ""}`);
+              setPhone("");
+              staffQ.refetch();
+            } catch (e) {
+              setNote(e instanceof Error ? e.message : "Could not grant staff");
+            } finally {
+              setBusy("");
+            }
+          }}
+        >
+          {busy === "grant" ? "Saving…" : "Create staff profile"}
+        </GoldButton>
+        {note && <p className="text-xs text-[#f5d97a] mt-2">{note}</p>}
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Assign a task</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          <select value={taskStaff} onChange={(e) => setTaskStaff(e.target.value)} className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]">
+            <option value="">Staff member</option>
+            {staff.map((s) => (
+              <option key={str(s.id)} value={str(s.id)}>{str(s.name, "Staff")} · {str(s.employee_code, "")}</option>
+            ))}
+          </select>
+          <select value={taskType} onChange={(e) => setTaskType(e.target.value)} className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]">
+            <option value="onboard">Onboard vendor · ₹200</option>
+            <option value="kyc">KYC · ₹50</option>
+            <option value="standee">Standee · ₹50</option>
+            <option value="call">Call</option>
+            <option value="survey">Survey</option>
+            <option value="custom">Custom</option>
+          </select>
+          <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="What should they do" className="sm:col-span-2 px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+        </div>
+        <GoldButton
+          className="mt-3"
+          variant="outline"
+          onClick={async () => {
+            if (!taskStaff || taskTitle.trim().length < 2) {
+              setNote("Pick a staff member and write the task");
+              return;
+            }
+            setBusy("task");
+            try {
+              await apiFetch("/v1/admin/staff/tasks", {
+                method: "POST",
+                body: JSON.stringify({ staff_id: taskStaff, title: taskTitle.trim(), task_type: taskType }),
+              });
+              setTaskTitle("");
+              setNote("Task is on their phone under Mere kaam");
+            } catch (e) {
+              setNote(e instanceof Error ? e.message : "Could not assign task");
+            } finally {
+              setBusy("");
+            }
+          }}
+        >
+          {busy === "task" ? "Sending…" : "Send task"}
+        </GoldButton>
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Tasks waiting for review</p>
+        {(tasksQ.data ?? []).filter((t) => str(t.status) === "submitted").length === 0 ? (
+          <p className="text-xs text-[#f5d97a]/60">No submitted tasks.</p>
+        ) : (
+          <div className="space-y-2">
+            {(tasksQ.data ?? []).filter((t) => str(t.status) === "submitted").map((t) => (
+              <div key={str(t.id)} className="flex flex-wrap items-center gap-2 text-xs text-[#fff8dc]">
+                <span className="font-bold">{str(t.title)}</span>
+                <span className="text-[#f5d97a]/70">{str(t.task_type)} · ₹{str(t.amount_inr, "0")}</span>
+                <GoldButton size="sm" onClick={async () => {
+                  await apiFetch(`/v1/admin/staff/tasks/${str(t.id)}/review`, { method: "POST", body: JSON.stringify({ approved: true }) });
+                  tasksQ.refetch();
+                }}>Approve & pay</GoldButton>
+                <GoldButton size="sm" variant="outline" onClick={async () => {
+                  await apiFetch(`/v1/admin/staff/tasks/${str(t.id)}/review`, { method: "POST", body: JSON.stringify({ approved: false }) });
+                  tasksQ.refetch();
+                }}>Reject</GoldButton>
+              </div>
+            ))}
+          </div>
+        )}
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Staff withdrawals</p>
+        {(withdrawalsQ.data ?? []).length === 0 ? (
+          <p className="text-xs text-[#f5d97a]/60">No withdrawal requests.</p>
+        ) : (
+          <div className="space-y-2">
+            {(withdrawalsQ.data ?? []).map((w) => (
+              <div key={str(w.id)} className="flex flex-wrap items-center gap-2 text-xs text-[#fff8dc]">
+                <span className="font-bold">{str(w.staff_name, "Staff")}</span>
+                <span>₹{str(w.amount_inr)}</span>
+                <span className="text-[#f5d97a]/70">{str(w.upi_id)} · {str(w.status)}</span>
+                {str(w.status) === "pending" && (
+                  <>
+                    <GoldButton size="sm" onClick={async () => {
+                      await apiFetch(`/v1/admin/staff/withdrawals/${str(w.id)}/paid`, { method: "POST" });
+                      withdrawalsQ.refetch();
+                    }}>Pay</GoldButton>
+                    <GoldButton size="sm" variant="outline" onClick={async () => {
+                      await apiFetch(`/v1/admin/staff/withdrawals/${str(w.id)}/rejected`, { method: "POST" });
+                      withdrawalsQ.refetch();
+                    }}>Reject</GoldButton>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </GoldCard>
 
       <div className="mb-6">
         <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">

@@ -3,16 +3,61 @@ import { z } from "zod";
 import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/respond.js";
 import { hasServiceRole } from "../config/env.js";
 import { ensureVendorSchema } from "../lib/apply-vendor-schema.js";
+import { getPool } from "../lib/pg-client.js";
+import { createOnboarding, setDuty, staffHome } from "../lib/staff-ops.js";
 import { getServiceRoleClient } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 
 export const staffRouter = Router();
 staffRouter.use(requireAuth);
+staffRouter.use((_req, _res, next) => {
+  ensureVendorSchema().then(() => next(), next);
+});
 
 async function myStaffId(req: import("express").Request): Promise<string | null> {
   const { data } = await req.userClient!.from("staff_profiles").select("id").eq("user_id", req.userId!).maybeSingle();
   return data?.id ?? null;
 }
+
+staffRouter.get(
+  "/home",
+  asyncHandler(async (req, res) => {
+    return ok(res, await staffHome(req.userId!));
+  }),
+);
+
+staffRouter.post(
+  "/duty",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ on: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const staff = await setDuty(req.userId!, parsed.data.on);
+    if (!staff) return fail(res, 404, "Staff profile not found");
+    return ok(res, { staff });
+  }),
+);
+
+staffRouter.post(
+  "/onboard",
+  asyncHandler(async (req, res) => {
+    const parsed = z
+      .object({
+        business_name: z.string().trim().min(2).max(160),
+        owner_name: z.string().trim().max(120).optional(),
+        phone: z.string().trim().min(10).max(16),
+        category: z.string().trim().max(80).optional(),
+        address: z.string().trim().max(300).optional(),
+        lat: z.number().optional(),
+        lng: z.number().optional(),
+        source: z.enum(["manual", "ocr", "link"]),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const result = await createOnboarding(req.userId!, parsed.data);
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result, 201);
+  }),
+);
 
 staffRouter.get(
   "/me",
@@ -48,11 +93,18 @@ staffRouter.post(
       })
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const patch: Record<string, unknown> = { status: parsed.data.status };
-    if (parsed.data.status === "submitted") patch.submitted_at = new Date().toISOString();
-    if (parsed.data.proof_urls) patch.proof_urls = parsed.data.proof_urls;
-    const { error } = await req.userClient!.from("staff_tasks").update(patch).eq("id", req.params.id);
-    if (error) return fail(res, 400, error.message);
+    const sid = await myStaffId(req);
+    if (!sid) return fail(res, 404, "Staff profile not found");
+    const { rows } = await getPool().query(
+      `update public.staff_tasks
+          set status = $3,
+              submitted_at = case when $3 = 'submitted' then now() else submitted_at end,
+              proof_urls = coalesce($4::text[], proof_urls)
+        where id = $1 and staff_id = $2
+        returning id`,
+      [req.params.id, sid, parsed.data.status, parsed.data.proof_urls ?? null],
+    );
+    if (!rows[0]) return fail(res, 404, "Task not found");
     return ok(res, { updated: true });
   }),
 );
@@ -73,7 +125,7 @@ staffRouter.get(
 staffRouter.post(
   "/wallet/withdraw",
   asyncHandler(async (req, res) => {
-    const parsed = z.object({ amount_inr: z.number().min(1), upi_id: z.string().min(4).max(80) }).safeParse(req.body);
+    const parsed = z.object({ amount_inr: z.number().min(500), upi_id: z.string().min(4).max(80) }).safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const sid = await myStaffId(req);
     if (!sid) return fail(res, 404, "Staff profile not found");
