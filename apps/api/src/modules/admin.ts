@@ -7,7 +7,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/admin.js";
 import { seedSmsGateways } from "../lib/seed-admin.js";
 import { getPool } from "../lib/pg-client.js";
-import { assignTask, decideWithdrawal, grantStaff, listStaffWithdrawals, reviewTask } from "../lib/staff-ops.js";
+import { approveDeskItem, assignTask, createStaffTicket, decideWithdrawal, grantStaff, issueQrStock, listPendingDesk, listQrRequests, listStaffWithdrawals, reviewTask } from "../lib/staff-ops.js";
 import { settle } from "../lib/payments.js";
 import { FcmConfigSchema, getFcmStatus, pushToUser, saveFcmConfig } from "../lib/push.js";
 import {
@@ -205,15 +205,16 @@ adminRouter.post(
       .object({
         staff_id: z.string().uuid(),
         title: z.string().min(2).max(160),
-        task_type: z.enum(["onboard", "kyc", "standee", "call", "survey", "custom"]),
+        task_type: z.enum(["onboard", "kyc", "standee", "call", "survey", "custom", "category", "care", "review"]),
         amount_inr: z.number().min(0).max(100000).optional(),
         note: z.string().max(500).optional(),
         due_label: z.string().max(40).optional(),
         shop_name: z.string().max(160).optional(),
+        target_count: z.number().int().min(0).max(500).optional(),
       })
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
-    const defaults: Record<string, number> = { onboard: 200, kyc: 50, standee: 50 };
+    const defaults: Record<string, number> = { onboard: 200, kyc: 50, standee: 50, category: 2, care: 10, review: 2 };
     const task = await assignTask({
       staffId: parsed.data.staff_id,
       title: parsed.data.title,
@@ -223,8 +224,62 @@ adminRouter.post(
       dueLabel: parsed.data.due_label,
       shopName: parsed.data.shop_name,
       assignedBy: req.userId,
+      targetCount: parsed.data.target_count,
     });
     return ok(res, { task }, 201);
+  }),
+);
+
+adminRouter.post(
+  "/staff/qr-stock",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ staff_id: z.string().uuid(), count: z.number().int().min(1).max(40) }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const codes = await issueQrStock(parsed.data.staff_id, parsed.data.count);
+    return ok(res, { codes }, 201);
+  }),
+);
+
+adminRouter.get(
+  "/staff/qr-requests",
+  asyncHandler(async (_req, res) => ok(res, { items: await listQrRequests() })),
+);
+
+adminRouter.get(
+  "/staff/desk",
+  asyncHandler(async (_req, res) => ok(res, { items: await listPendingDesk() })),
+);
+
+adminRouter.post(
+  "/staff/desk/:id/approve",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) return fail(res, 400, "Invalid item");
+    const result = await approveDeskItem(id.data);
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result);
+  }),
+);
+
+adminRouter.post(
+  "/staff/tickets",
+  asyncHandler(async (req, res) => {
+    const parsed = z
+      .object({
+        staff_id: z.string().uuid(),
+        title: z.string().min(2).max(160),
+        body: z.string().max(500).optional(),
+        contact_phone: z.string().max(20).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const ticket = await createStaffTicket({
+      staffId: parsed.data.staff_id,
+      title: parsed.data.title,
+      body: parsed.data.body,
+      contactPhone: parsed.data.contact_phone,
+    });
+    return ok(res, { ticket }, 201);
   }),
 );
 

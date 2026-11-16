@@ -4,7 +4,8 @@ import { asyncHandler, fail, ok, serviceUnavailable, zodFail } from "../lib/resp
 import { hasServiceRole } from "../config/env.js";
 import { ensureVendorSchema } from "../lib/apply-vendor-schema.js";
 import { getPool } from "../lib/pg-client.js";
-import { createOnboarding, setDuty, staffHome } from "../lib/staff-ops.js";
+import { addDeskItem, addOnboardingKyc, createOnboarding, decideReview, last10, mapStaffQr, requestQrStock, resolveStaffTicket, setDuty, staffHome, taskWork, testStaffQr } from "../lib/staff-ops.js";
+import { sendOtp, verifyOtp } from "../lib/otp.js";
 import { getServiceRoleClient } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 
@@ -38,6 +39,32 @@ staffRouter.post(
 );
 
 staffRouter.post(
+  "/vendor-otp/send",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ phone: z.string().min(10).max(16) }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const phone = last10(parsed.data.phone);
+    if (phone.length !== 10) return fail(res, 400, "Enter a 10-digit mobile number");
+    const sent = await sendOtp({ phone, channel: "sms" });
+    if (!sent.ok) return fail(res, 400, "error" in sent ? String(sent.error) : "OTP send failed");
+    const otpCode = "otp_code" in sent ? sent.otp_code : undefined;
+    return ok(res, { sent: true, ...(otpCode ? { otp_code: otpCode } : {}) });
+  }),
+);
+
+staffRouter.post(
+  "/vendor-otp/check",
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ phone: z.string().min(10).max(16), code: z.string().min(4).max(8) }).safeParse(req.body);
+    if (!parsed.success) return zodFail(res, parsed.error);
+    const phone = last10(parsed.data.phone);
+    const checked = await verifyOtp({ phone, code: parsed.data.code });
+    if (!checked.ok) return fail(res, 400, checked.error ?? "Wrong OTP");
+    return ok(res, { verified: true });
+  }),
+);
+
+staffRouter.post(
   "/onboard",
   asyncHandler(async (req, res) => {
     const parsed = z
@@ -50,12 +77,41 @@ staffRouter.post(
         lat: z.number().optional(),
         lng: z.number().optional(),
         source: z.enum(["manual", "ocr", "link"]),
+        photo_out_url: z.string().max(1000).optional(),
+        photo_in_url: z.string().max(1000).optional(),
+        kyc_aadhaar_url: z.string().max(1000).optional(),
+        kyc_pan_url: z.string().max(1000).optional(),
+        kyc_gst_url: z.string().max(1000).optional(),
+        otp_verified: z.boolean().optional(),
+        confirm_similar: z.boolean().optional(),
       })
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const result = await createOnboarding(req.userId!, parsed.data);
     if (!result.ok) return fail(res, 400, result.error);
     return ok(res, result, 201);
+  }),
+);
+
+staffRouter.post(
+  "/onboard/:id/kyc",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const parsed = z
+      .object({
+        kyc_aadhaar_url: z.string().max(1000).optional(),
+        kyc_pan_url: z.string().max(1000).optional(),
+        kyc_gst_url: z.string().max(1000).optional(),
+      })
+      .safeParse(req.body);
+    if (!id.success || !parsed.success) return fail(res, 400, "Invalid KYC update");
+    const result = await addOnboardingKyc(req.userId!, id.data, {
+      aadhaar: parsed.data.kyc_aadhaar_url,
+      pan: parsed.data.kyc_pan_url,
+      gst: parsed.data.kyc_gst_url,
+    });
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result);
   }),
 );
 
@@ -90,22 +146,127 @@ staffRouter.post(
       .object({
         status: z.enum(["in_progress", "submitted"]),
         proof_urls: z.array(z.string()).optional(),
+        result_note: z.string().max(500).optional(),
       })
       .safeParse(req.body);
     if (!parsed.success) return zodFail(res, parsed.error);
     const sid = await myStaffId(req);
     if (!sid) return fail(res, 404, "Staff profile not found");
+    if (parsed.data.status === "submitted") {
+      const current = await getPool().query(`select task_type, qr_codes, target_count, done_count from public.staff_tasks where id = $1 and staff_id = $2`, [req.params.id, sid]);
+      const task = current.rows[0];
+      if (task?.task_type === "standee" && !(task.qr_codes?.length > 0)) {
+        return fail(res, 400, "Kam se kam 1 QR scan karein");
+      }
+      if (task && Number(task.target_count) > 0 && Number(task.done_count) < Number(task.target_count)) {
+        return fail(res, 400, `Abhi ${task.done_count}/${task.target_count} poora hua hai`);
+      }
+    }
     const { rows } = await getPool().query(
       `update public.staff_tasks
           set status = $3,
               submitted_at = case when $3 = 'submitted' then now() else submitted_at end,
-              proof_urls = coalesce($4::text[], proof_urls)
+              proof_urls = coalesce($4::text[], proof_urls),
+              result_note = coalesce($5, result_note)
         where id = $1 and staff_id = $2
         returning id`,
-      [req.params.id, sid, parsed.data.status, parsed.data.proof_urls ?? null],
+      [req.params.id, sid, parsed.data.status, parsed.data.proof_urls ?? null, parsed.data.result_note ?? null],
     );
     if (!rows[0]) return fail(res, 404, "Task not found");
     return ok(res, { updated: true });
+  }),
+);
+
+staffRouter.post(
+  "/tasks/:id/qr",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const parsed = z.object({ code: z.string().min(4).max(200) }).safeParse(req.body);
+    if (!id.success || !parsed.success) return fail(res, 400, "Invalid QR");
+    const result = await mapStaffQr(req.userId!, id.data, parsed.data.code);
+    if (!result.ok) return fail(res, 409, result.error);
+    return ok(res, result);
+  }),
+);
+
+staffRouter.post(
+  "/tasks/:id/qr-test",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const parsed = z.object({ code: z.string().min(4).max(200) }).safeParse(req.body);
+    if (!id.success || !parsed.success) return fail(res, 400, "Invalid QR");
+    const result = await testStaffQr(req.userId!, id.data, parsed.data.code);
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result);
+  }),
+);
+
+staffRouter.get(
+  "/tasks/:id/work",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) return fail(res, 400, "Invalid task");
+    const result = await taskWork(req.userId!, id.data);
+    if (!result.ok) return fail(res, 404, result.error);
+    return ok(res, result);
+  }),
+);
+
+staffRouter.post(
+  "/tasks/:id/desk",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const parsed = z
+      .object({
+        title: z.string().min(2).max(160),
+        parent_name: z.string().max(80).optional(),
+        detail: z.string().max(500).optional(),
+        status: z.string().max(40).optional(),
+      })
+      .safeParse(req.body);
+    if (!id.success || !parsed.success) return fail(res, 400, "Invalid desk item");
+    const result = await addDeskItem(req.userId!, id.data, {
+      title: parsed.data.title,
+      parentName: parsed.data.parent_name,
+      detail: parsed.data.detail,
+      status: parsed.data.status,
+    });
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result, 201);
+  }),
+);
+
+staffRouter.post(
+  "/tasks/:id/reviews/:reviewId",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const reviewId = z.string().uuid().safeParse(req.params.reviewId);
+    const parsed = z.object({ hide: z.boolean() }).safeParse(req.body);
+    if (!id.success || !reviewId.success || !parsed.success) return fail(res, 400, "Invalid review");
+    const result = await decideReview(req.userId!, id.data, reviewId.data, parsed.data.hide);
+    if (!result.ok) return fail(res, 400, result.error);
+    return ok(res, result);
+  }),
+);
+
+staffRouter.post(
+  "/qr-stock/request",
+  asyncHandler(async (req, res) => {
+    const result = await requestQrStock(req.userId!);
+    if (!result.ok) return fail(res, 404, result.error);
+    return ok(res, result, 201);
+  }),
+);
+
+staffRouter.post(
+  "/tickets/:id/resolve",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    const parsed = z.object({ note: z.string().max(500).optional() }).safeParse(req.body ?? {});
+    if (!id.success || !parsed.success) return fail(res, 400, "Invalid ticket");
+    const result = await resolveStaffTicket(req.userId!, id.data, parsed.data.note);
+    if (!result.ok) return fail(res, 404, result.error);
+    return ok(res, result);
   }),
 );
 

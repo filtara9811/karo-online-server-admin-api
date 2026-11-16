@@ -3,25 +3,44 @@ import { getPool } from "./pg-client.js";
 
 export type KycSubject = "vendor" | "customer";
 
+const IdPayload = z
+  .object({
+    name: z.string().trim().max(120).optional(),
+    dob: z.string().trim().max(20).optional(),
+  })
+  .optional();
+
 const Aadhaar = z.object({
   check_type: z.literal("aadhaar"),
   document_number: z.string().regex(/^\d{12}$/, "Aadhaar must be 12 digits"),
-  document_urls: z.array(z.string().max(1000)).min(2).max(2),
+  document_urls: z.array(z.string().max(1000)).min(1).max(2),
+  payload: IdPayload,
 });
 const Pan = z.object({
   check_type: z.literal("pan"),
   document_number: z.string().toUpperCase().pipe(z.string().regex(/^[A-Z]{5}\d{4}[A-Z]$/, "Enter a valid PAN")),
   document_urls: z.array(z.string().max(1000)).max(1).optional(),
+  payload: IdPayload,
 });
 const Bank = z.object({
   check_type: z.literal("bank"),
   document_number: z.string().regex(/^\d{9,18}$/, "Enter a valid account number"),
   confirm_number: z.string().optional(),
+  document_urls: z.array(z.string().max(1000)).max(1).optional(),
   payload: z.object({
     holder: z.string().trim().min(2),
     ifsc: z.string().toUpperCase().pipe(z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Enter a valid IFSC")),
     upi: z.string().trim().max(80).optional(),
   }),
+});
+const Gst = z.object({
+  check_type: z.literal("gst"),
+  document_number: z
+    .string()
+    .toUpperCase()
+    .pipe(z.string().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/, "Enter a valid GSTIN")),
+  document_urls: z.array(z.string().max(1000)).max(1).optional(),
+  payload: z.object({ business: z.string().trim().min(2).max(160) }),
 });
 
 const schemas = {
@@ -44,6 +63,7 @@ const schemas = {
     Aadhaar,
     Pan,
     Bank,
+    Gst,
   ]),
 };
 

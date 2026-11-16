@@ -115,6 +115,7 @@ export async function acceptLeadForVendor(leadId: string, vendorId: string, opts
       [leadId, vendorId, Boolean(opts.auto), lead.sub_category_name ?? null],
     );
     await client.query("commit");
+    void import("./staff-ops.js").then((m) => m.payStaffFirstOrderBonus(vendorId)).catch(() => null);
     void recordVendorVisit({
       vendorId,
       userId: lead.customer_id ?? null,

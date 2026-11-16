@@ -13,7 +13,14 @@ export default function StaffPage() {
   const [role, setRole] = useState("Field Sales");
   const [taskStaff, setTaskStaff] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
+  const [taskShop, setTaskShop] = useState("");
+  const [taskNote, setTaskNote] = useState("");
   const [taskType, setTaskType] = useState("onboard");
+  const [ticketTitle, setTicketTitle] = useState("");
+  const [ticketBody, setTicketBody] = useState("");
+  const [ticketPhone, setTicketPhone] = useState("");
+  const [taskTarget, setTaskTarget] = useState("");
+  const [qrCount, setQrCount] = useState("10");
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const staffQ = useQuery({
@@ -23,6 +30,14 @@ export default function StaffPage() {
   const tasksQ = useQuery({
     queryKey: ["admin-staff-tasks"],
     queryFn: async () => asList(await apiFetch("/v1/admin/table/staff_tasks")),
+  });
+  const qrReqQ = useQuery({
+    queryKey: ["admin-staff-qr"],
+    queryFn: async () => asList(await apiFetch("/v1/admin/staff/qr-requests")),
+  });
+  const deskQ = useQuery({
+    queryKey: ["admin-staff-desk"],
+    queryFn: async () => asList(await apiFetch("/v1/admin/staff/desk")),
   });
   const withdrawalsQ = useQuery({
     queryKey: ["admin-staff-withdrawals"],
@@ -132,8 +147,14 @@ export default function StaffPage() {
             <option value="call">Call</option>
             <option value="survey">Survey</option>
             <option value="custom">Custom</option>
+            <option value="category">Category upload</option>
+            <option value="care">Customer care</option>
+            <option value="review">Review check</option>
           </select>
           <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="What should they do" className="sm:col-span-2 px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={taskShop} onChange={(e) => setTaskShop(e.target.value)} placeholder="Shop name, for a standee or visit" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={taskNote} onChange={(e) => setTaskNote(e.target.value)} placeholder="Note the staff will see" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={taskTarget} onChange={(e) => setTaskTarget(e.target.value)} placeholder="How many (shops, calls, names)" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
         </div>
         <GoldButton
           className="mt-3"
@@ -147,7 +168,7 @@ export default function StaffPage() {
             try {
               await apiFetch("/v1/admin/staff/tasks", {
                 method: "POST",
-                body: JSON.stringify({ staff_id: taskStaff, title: taskTitle.trim(), task_type: taskType }),
+                body: JSON.stringify({ staff_id: taskStaff, title: taskTitle.trim(), task_type: taskType, shop_name: taskShop.trim() || undefined, note: taskNote.trim() || undefined, target_count: Number(taskTarget) || undefined }),
               });
               setTaskTitle("");
               setNote("Task is on their phone under Mere kaam");
@@ -160,6 +181,78 @@ export default function StaffPage() {
         >
           {busy === "task" ? "Sending…" : "Send task"}
         </GoldButton>
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Blank QR standees</p>
+        <div className="flex gap-2">
+          <input value={qrCount} onChange={(e) => setQrCount(e.target.value)} className="w-24 px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <GoldButton variant="outline" onClick={async () => {
+            if (!taskStaff) { setNote("Pick a staff member first"); return; }
+            setBusy("qr");
+            try {
+              const data = await apiFetch<{ codes?: string[] }>("/v1/admin/staff/qr-stock", { method: "POST", body: JSON.stringify({ staff_id: taskStaff, count: Number(qrCount) || 10 }) });
+              setNote(`${data.codes?.length ?? 0} blank QR codes issued`);
+              qrReqQ.refetch();
+            } catch (e) {
+              setNote(e instanceof Error ? e.message : "Could not issue QR");
+            } finally { setBusy(""); }
+          }}>{busy === "qr" ? "Issuing…" : "Issue to selected staff"}</GoldButton>
+        </div>
+        <div className="mt-3 space-y-1">
+          {(qrReqQ.data ?? []).map((r) => (
+            <p key={str(r.id)} className="text-xs text-[#f5d97a]/80">{str(r.staff_name, "Staff")} asked for more standees</p>
+          ))}
+        </div>
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Category uploads to approve</p>
+        {(deskQ.data ?? []).length === 0 ? <p className="text-xs text-[#f5d97a]/60">None waiting.</p> : (deskQ.data ?? []).map((d) => (
+          <div key={str(d.id)} className="flex items-center gap-2 text-xs text-[#fff8dc] mb-2">
+            <span className="font-bold">{str(d.title)}</span>
+            <span className="text-[#f5d97a]/70">{str(d.parent_name)} · {str(d.staff_name)}</span>
+            <GoldButton size="sm" onClick={async () => {
+              await apiFetch(`/v1/admin/staff/desk/${str(d.id)}/approve`, { method: "POST" });
+              deskQ.refetch();
+            }}>Approve</GoldButton>
+          </div>
+        ))}
+      </GoldCard>
+
+      <GoldCard className="p-4 mb-6">
+        <p className="text-[10px] uppercase tracking-[0.25em] text-[#d4af37]/70 font-bold mb-2">Give a ticket</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          <select value={taskStaff} onChange={(e) => setTaskStaff(e.target.value)} className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]">
+            <option value="">Staff member</option>
+            {staff.map((s) => (
+              <option key={`t-${str(s.id)}`} value={str(s.id)}>{str(s.name, "Staff")}</option>
+            ))}
+          </select>
+          <input value={ticketPhone} onChange={(e) => setTicketPhone(e.target.value)} placeholder="Customer phone to call" className="px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={ticketTitle} onChange={(e) => setTicketTitle(e.target.value)} placeholder="Ticket title" className="sm:col-span-2 px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+          <input value={ticketBody} onChange={(e) => setTicketBody(e.target.value)} placeholder="What happened" className="sm:col-span-2 px-3 py-2 rounded-lg bg-black/30 border border-[#d4af37]/30 text-[#f5d97a]" />
+        </div>
+        <GoldButton className="mt-3" variant="outline" onClick={async () => {
+          if (!taskStaff || ticketTitle.trim().length < 2) {
+            setNote("Pick a staff member and write the ticket");
+            return;
+          }
+          setBusy("ticket");
+          try {
+            await apiFetch("/v1/admin/staff/tickets", {
+              method: "POST",
+              body: JSON.stringify({ staff_id: taskStaff, title: ticketTitle.trim(), body: ticketBody.trim() || undefined, contact_phone: ticketPhone.trim() || undefined }),
+            });
+            setTicketTitle("");
+            setTicketBody("");
+            setNote("Ticket is on their phone under Mere kaam");
+          } catch (e) {
+            setNote(e instanceof Error ? e.message : "Could not send ticket");
+          } finally {
+            setBusy("");
+          }
+        }}>{busy === "ticket" ? "Sending…" : "Send ticket"}</GoldButton>
       </GoldCard>
 
       <GoldCard className="p-4 mb-6">

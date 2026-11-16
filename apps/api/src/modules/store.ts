@@ -54,8 +54,15 @@ storeRouter.get(
   requireAuth,
   guard(async (req, res) => {
     const { rows } = await q(
-      `select o.*, coalesce(v.business_name, v.owner_name, 'Shop') as shop_name, v.avatar_url as shop_avatar,
-              v.whatsapp as shop_phone, d.slug as shop_code
+      `select o.*,
+              coalesce(v.business_name, v.owner_name, 'Shop') as shop_name,
+              v.avatar_url as shop_avatar,
+              v.whatsapp as shop_phone,
+              v.rating_avg::float as shop_rating,
+              coalesce(v.rating_count, 0)::int as shop_rating_count,
+              nullif(trim(concat_ws(', ', nullif(v.address, ''), nullif(v.city, ''))), '') as shop_address,
+              v.city as city,
+              d.slug as shop_code
          from public.shop_orders o
          left join public.vendors v on v.user_id = o.vendor_id
          left join lateral (select slug from public.digital_shops where user_id = o.vendor_id and slug is not null limit 1) d on true
@@ -106,7 +113,7 @@ storeRouter.get(
         `select r.stars, r.comment, r.tags, r.created_at,
                 coalesce(nullif(trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')), ''), c.name, 'Customer') as customer_name
            from public.vendor_reviews r left join public.customers c on c.user_id = r.customer_id
-          where r.vendor_id = $1 order by r.created_at desc limit 20`,
+          where r.vendor_id = $1 and coalesce(r.hidden, false) = false order by r.created_at desc limit 20`,
         [vid],
       ),
       q(
@@ -116,7 +123,7 @@ storeRouter.get(
         [vid],
       ).catch(() => ({ rows: [] })),
       viewerId(req),
-      q(`select coalesce(round(avg(stars)::numeric, 2), 0)::float as avg, count(*)::int as n from public.vendor_reviews where vendor_id = $1`, [vid]),
+      q(`select coalesce(round(avg(stars)::numeric, 2), 0)::float as avg, count(*)::int as n from public.vendor_reviews where vendor_id = $1 and coalesce(hidden, false) = false`, [vid]),
     ]);
     return ok(res, {
       shop: {
@@ -227,6 +234,7 @@ storeRouter.post(
       return rows[0];
     });
     await notifyNewOrder(order);
+    void import("../lib/staff-ops.js").then((m) => m.payStaffFirstOrderBonus(String(order.vendor_id))).catch(() => null);
     return ok(res, { order }, 201);
   }),
 );

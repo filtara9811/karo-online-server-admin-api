@@ -100,7 +100,7 @@ export async function staffHome(userId: string) {
   const profile = await profileByUser(userId);
   if (!profile) return { staff: null };
   const sid = profile.id as string;
-  const [wallet, ledger, tasks, onboarded, counts] = await Promise.all([
+  const [wallet, ledger, tasks, onboarded, counts, withdrawals, tickets, stock] = await Promise.all([
     q(`select * from public.staff_wallets where staff_id = $1`, [sid]),
     q(
       `select id, amount_inr, kind, note, created_at from public.staff_wallet_ledger
@@ -108,22 +108,38 @@ export async function staffHome(userId: string) {
       [sid],
     ),
     q(
-      `select id, title, description, task_type, status, amount_inr, due_label, admin_note, shop_name, assigned_at, submitted_at
+      `select id, title, description, task_type, status, amount_inr, due_label, admin_note, shop_name, qr_codes, result_note, target_count, done_count, assigned_at, submitted_at
          from public.staff_tasks where staff_id = $1 order by assigned_at desc limit 50`,
       [sid],
     ),
     q(
-      `select id, business_name, owner_name, phone, category, address, source, status, created_at
-         from public.staff_onboardings where staff_id = $1 order by created_at desc limit 50`,
+      `select o.id, o.business_name, o.owner_name, o.phone, o.category, o.address, o.lat, o.lng, o.source, o.status,
+              o.otp_verified, o.created_at, o.photo_out_url, o.photo_in_url, o.kyc_aadhaar_url, o.kyc_pan_url, o.kyc_gst_url,
+              coalesce(v.staff_bonus_paid, o.bonus_paid, false) as bonus_paid
+         from public.staff_onboardings o
+         left join public.vendors v on v.user_id = o.vendor_user_id
+        where o.staff_id = $1
+        order by o.created_at desc limit 50`,
       [sid],
     ),
     q(
       `select
-         (select count(*)::int from public.staff_onboardings where staff_id = $1) as vendors,
-         (select count(*)::int from public.staff_tasks where staff_id = $1 and task_type = 'standee' and status in ('submitted','approved')) as standees,
-         (select count(*)::int from public.staff_tasks where staff_id = $1 and task_type = 'kyc' and status in ('submitted','approved')) as kyc`,
+         (select count(*)::int from public.staff_onboardings where staff_id = $1 and (created_at at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date) as vendors,
+         (select count(*)::int from public.staff_tasks where staff_id = $1 and task_type = 'standee' and status in ('submitted','approved') and (coalesce(submitted_at, assigned_at) at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date) as standees,
+         (select count(*)::int from public.staff_tasks where staff_id = $1 and task_type = 'kyc' and status in ('submitted','approved') and (coalesce(submitted_at, assigned_at) at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date) as kyc`,
       [sid],
     ),
+    q(
+      `select id, amount_inr, upi_id, status, created_at, reviewed_at
+         from public.staff_withdrawal_requests where staff_id = $1 order by created_at desc limit 20`,
+      [sid],
+    ),
+    q(
+      `select id, title, body, contact_phone, status, created_at
+         from public.staff_tickets where staff_id = $1 and status = 'open' order by created_at desc limit 30`,
+      [sid],
+    ),
+    q(`select count(*)::int as n from public.staff_qr_stock where staff_id = $1 and mapped_at is null`, [sid]),
   ]);
   return {
     staff: profile,
@@ -131,6 +147,9 @@ export async function staffHome(userId: string) {
     ledger: ledger.rows,
     tasks: tasks.rows,
     onboarded: onboarded.rows,
+    withdrawals: withdrawals.rows,
+    tickets: tickets.rows,
+    qr_stock: Number(stock.rows[0]?.n ?? 0),
     counts: counts.rows[0] ?? { vendors: 0, standees: 0, kyc: 0 },
     targets: { vendors: 8, standees: 10, kyc: 6 },
     rates: { vendor: 200, standee: 50, kyc: 50 },
@@ -161,18 +180,36 @@ export async function createOnboarding(
     lat?: number;
     lng?: number;
     source: "manual" | "ocr" | "link";
+    photo_out_url?: string;
+    photo_in_url?: string;
+    kyc_aadhaar_url?: string;
+    kyc_pan_url?: string;
+    kyc_gst_url?: string;
+    otp_verified?: boolean;
+    confirm_similar?: boolean;
   },
 ) {
   const staff = await requireActiveStaff(userId);
   if (!staff) return { ok: false as const, error: "Staff profile is not active" };
   const phone = last10(body.phone);
   if (phone.length !== 10) return { ok: false as const, error: "Enter a 10-digit mobile number" };
+  const dup = await q(
+    `select id from public.staff_onboardings
+      where staff_id = $1 and phone = $2 and status <> 'live' limit 1`,
+    [staff.id, phone],
+  );
+  if (dup.rows[0]) return { ok: false as const, error: "This mobile is already in your onboard list" };
+  if (!body.confirm_similar) {
+    const similar = await findSimilarShop(staff.id as string, body.business_name);
+    if (similar) return { ok: false as const, error: `Milti-julti dukaan: ${similar}. Alag dukaan hai to dobara jodein.` };
+  }
   const existing = await findUserByPhone(phone);
   const status = body.source === "link" && !existing ? "link_sent" : "pending";
   const { rows } = await q(
     `insert into public.staff_onboardings
-       (staff_id, business_name, owner_name, phone, category, address, lat, lng, source, status, vendor_user_id)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       (staff_id, business_name, owner_name, phone, category, address, lat, lng, source, status, vendor_user_id,
+        photo_out_url, photo_in_url, kyc_aadhaar_url, kyc_pan_url, kyc_gst_url, otp_verified)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
      returning *`,
     [
       staff.id,
@@ -186,6 +223,12 @@ export async function createOnboarding(
       body.source,
       status,
       existing?.id ?? null,
+      body.photo_out_url ?? null,
+      body.photo_in_url ?? null,
+      body.kyc_aadhaar_url ?? null,
+      body.kyc_pan_url ?? null,
+      body.kyc_gst_url ?? null,
+      body.otp_verified === true,
     ],
   );
   if (existing) {
@@ -196,7 +239,48 @@ export async function createOnboarding(
       [existing.id, staff.id],
     );
   }
+  await q(
+    `update public.staff_tasks set done_count = coalesce(done_count, 0) + 1
+      where id = (
+        select id from public.staff_tasks
+         where staff_id = $1 and task_type = 'onboard' and status = 'assigned'
+           and coalesce(target_count, 0) > coalesce(done_count, 0)
+         order by assigned_at asc limit 1
+      )`,
+    [staff.id],
+  );
   return { ok: true as const, onboarding: rows[0] };
+}
+
+function shopKey(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/\b(the|shop|store|dukaan|wala|wale|and|aur|ki|ka|di)\b/g, " ")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function namesAreSimilar(a: string, b: string) {
+  if (a.length < 4 || b.length < 4 || a === b) return a.length >= 4 && a === b;
+  const head = Math.max(5, Math.min(a.length, b.length) - 2);
+  return a.slice(0, head) === b.slice(0, head);
+}
+
+async function findSimilarShop(staffId: string, name: string) {
+  const key = shopKey(name);
+  if (key.length < 4) return null;
+  const word = (name.trim().split(/\s+/).find((part) => shopKey(part).length >= 4) ?? name.trim()).replace(/[%_]/g, "");
+  const { rows } = await q(
+    `select business_name from public.staff_onboardings where staff_id = $1
+     union all
+     select business_name from public.vendors where business_name ilike $2
+     limit 80`,
+    [staffId, `%${word}%`],
+  );
+  for (const row of rows) {
+    const other = String(row.business_name ?? "");
+    if (namesAreSimilar(key, shopKey(other))) return other;
+  }
+  return null;
 }
 
 export async function attributeVendorJoin(vendorUserId: string, whatsapp: string, staffCode?: string | null) {
@@ -247,9 +331,276 @@ export async function payVendorStaffBonus(vendorUserId: string) {
   if (!row) return;
   await creditStaff(row.onboarded_by_staff_id, 200, "vendor_approve", `Vendor approved · ${row.business_name ?? "shop"}`);
   await q(
-    `update public.staff_onboardings set status = 'live' where vendor_user_id = $1 and status <> 'live'`,
+    `update public.staff_onboardings set status = 'live', bonus_paid = true where vendor_user_id = $1 and status <> 'live'`,
     [vendorUserId],
   );
+}
+
+export async function addOnboardingKyc(
+  userId: string,
+  onboardingId: string,
+  photos: { aadhaar?: string; pan?: string; gst?: string },
+) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  if (!photos.aadhaar && !photos.pan && !photos.gst) return { ok: false as const, error: "Kam se kam ek KYC photo chahiye" };
+  const { rows } = await q(
+    `update public.staff_onboardings
+        set kyc_aadhaar_url = coalesce($3, kyc_aadhaar_url),
+            kyc_pan_url = coalesce($4, kyc_pan_url),
+            kyc_gst_url = coalesce($5, kyc_gst_url)
+      where id = $1 and staff_id = $2 and status <> 'live'
+      returning id`,
+    [onboardingId, staff.id, photos.aadhaar ?? null, photos.pan ?? null, photos.gst ?? null],
+  );
+  if (!rows[0]) return { ok: false as const, error: "Shop not found" };
+  return { ok: true as const };
+}
+
+export function readQrCode(raw: string): string {
+  const text = raw.trim();
+  const tagged = text.match(/KO-QR-[0-9A-Z]{3,12}/i);
+  if (tagged) return tagged[0].toUpperCase();
+  try {
+    const last = decodeURIComponent(new URL(text).pathname.split("/").filter(Boolean).pop() ?? "");
+    if (/^[A-Za-z0-9_-]{4,40}$/.test(last)) return last.toUpperCase();
+  } catch {
+    /* typed codes are not URLs */
+  }
+  const plain = text.replace(/\s+/g, "");
+  if (/^[A-Za-z0-9_-]{4,40}$/.test(plain)) return plain.toUpperCase();
+  return "";
+}
+
+export async function mapStaffQr(userId: string, taskId: string, raw: string) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const code = readQrCode(raw);
+  if (!code) return { ok: false as const, error: "Ye Karo QR nahi lagta. Code KO-QR- jaisa hona chahiye." };
+  const task = await q(`select id, shop_name, title, task_type from public.staff_tasks where id = $1 and staff_id = $2`, [taskId, staff.id]);
+  const row = task.rows[0];
+  if (!row) return { ok: false as const, error: "Task not found" };
+  if (row.task_type !== "standee") return { ok: false as const, error: "QR mapping is only for a standee task" };
+  const shop = String(row.shop_name || row.title || "dukaan");
+  const existing = await q(`select code, shop_name, task_id from public.staff_qr_codes where code = $1`, [code]);
+  const prev = existing.rows[0];
+  if (prev) {
+    if (String(prev.task_id) === taskId) return { ok: false as const, error: `${code} isi dukaan ke liye pehle scan ho chuka hai` };
+    return { ok: false as const, error: `${code} pehle se ${prev.shop_name || "dusri dukaan"} se juda hai. Ye standee mat lagaiye.` };
+  }
+  const stock = await q(`select staff_id, mapped_at from public.staff_qr_stock where code = $1`, [code]);
+  const mine = stock.rows[0];
+  if (!mine || String(mine.staff_id) !== String(staff.id)) {
+    return { ok: false as const, error: `${code} aapke blank stock me nahi hai. Admin se standee maangein.` };
+  }
+  if (mine.mapped_at) return { ok: false as const, error: `${code} pehle se use ho chuka hai` };
+  await q(
+    `insert into public.staff_qr_codes (code, shop_name, staff_id, task_id) values ($1,$2,$3,$4)`,
+    [code, shop, staff.id, taskId],
+  );
+  await q(`update public.staff_qr_stock set mapped_at = now(), shop_name = $2, task_id = $3 where code = $1`, [code, shop, taskId]);
+  await q(
+    `update public.staff_tasks
+        set qr_codes = (select array_agg(distinct c) from unnest(coalesce(qr_codes, '{}') || array[$2]::text[]) c)
+      where id = $1`,
+    [taskId, code],
+  );
+  return { ok: true as const, code, shop_name: shop };
+}
+
+export async function testStaffQr(userId: string, taskId: string, raw: string) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const code = readQrCode(raw);
+  if (!code) return { ok: false as const, error: "Ye Karo QR nahi lagta" };
+  const task = await q(`select shop_name, title, qr_codes from public.staff_tasks where id = $1 and staff_id = $2`, [taskId, staff.id]);
+  const row = task.rows[0];
+  if (!row) return { ok: false as const, error: "Task not found" };
+  const codes: string[] = row.qr_codes ?? [];
+  if (!codes.includes(code)) return { ok: false as const, error: `${code} is dukaan par map nahi hua` };
+  return { ok: true as const, code, shop_name: String(row.shop_name || row.title || "dukaan") };
+}
+
+export async function issueQrStock(staffId: string, count: number) {
+  const { randomBytes } = await import("node:crypto");
+  const made: string[] = [];
+  let guard = 0;
+  while (made.length < count && guard < count * 8) {
+    guard += 1;
+    const code = `KO-QR-${randomBytes(2).toString("hex").toUpperCase()}`;
+    const ins = await q(
+      `insert into public.staff_qr_stock (code, staff_id) values ($1, $2) on conflict (code) do nothing returning code`,
+      [code, staffId],
+    );
+    if (ins.rows[0]) made.push(ins.rows[0].code);
+  }
+  return made;
+}
+
+export async function requestQrStock(userId: string) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  await q(`insert into public.staff_qr_requests (staff_id) values ($1)`, [staff.id]);
+  return { ok: true as const };
+}
+
+export async function listQrRequests() {
+  const { rows } = await q(
+    `select r.id, r.status, r.created_at, p.name as staff_name, p.employee_code, r.staff_id
+       from public.staff_qr_requests r
+       left join public.staff_profiles p on p.id = r.staff_id
+      where r.status = 'pending' order by r.created_at desc limit 30`,
+  );
+  return rows;
+}
+
+export async function payStaffFirstOrderBonus(vendorUserId: string) {
+  const { rows } = await q(
+    `update public.vendors v
+        set staff_first_order_paid = true, updated_at = now()
+      where v.user_id = $1
+        and v.onboarded_by_staff_id is not null
+        and coalesce(v.staff_first_order_paid, false) = false
+        and (
+          exists (
+            select 1 from public.staff_onboardings o
+             where o.vendor_user_id = v.user_id and o.created_at > now() - interval '7 days'
+          )
+          or (
+            v.created_at > now() - interval '7 days'
+            and not exists (select 1 from public.staff_onboardings o where o.vendor_user_id = v.user_id)
+          )
+        )
+      returning onboarded_by_staff_id, business_name`,
+    [vendorUserId],
+  );
+  const row = rows[0];
+  if (!row) return;
+  await creditStaff(row.onboarded_by_staff_id, 100, "first_order", `Pehla order 7 din me · ${row.business_name ?? "shop"}`);
+}
+
+async function pingStaff(staffId: string, title: string, body: string) {
+  try {
+    const { rows } = await q(`select user_id from public.staff_profiles where id = $1`, [staffId]);
+    const userId = rows[0]?.user_id;
+    if (!userId) return;
+    const { pushToUser } = await import("./push.js");
+    await pushToUser({
+      userId: String(userId),
+      title,
+      body,
+      actionUrl: "/staff",
+      extraData: { kind: "staff" },
+    });
+  } catch {
+    /* the task is still on the phone the next time staff opens the app */
+  }
+}
+
+export async function taskWork(userId: string, taskId: string) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const task = await q(`select id, task_type from public.staff_tasks where id = $1 and staff_id = $2`, [taskId, staff.id]);
+  if (!task.rows[0]) return { ok: false as const, error: "Task not found" };
+  const items = await q(
+    `select id, kind, title, detail, parent_name, status, created_at from public.staff_desk_items where task_id = $1 order by created_at desc limit 40`,
+    [taskId],
+  );
+  const reviews = task.rows[0].task_type === "review"
+    ? await q(
+        `select r.id, r.stars, r.comment, v.business_name
+           from public.vendor_reviews r
+           join public.vendors v on v.user_id = r.vendor_id
+          where coalesce(r.hidden, false) = false
+            and not exists (
+              select 1 from public.staff_desk_items d where d.ref_id = r.id and d.kind = 'review' and d.status <> 'open'
+            )
+          order by r.created_at desc limit 20`,
+      )
+    : { rows: [] };
+  return { ok: true as const, items: items.rows, reviews: reviews.rows };
+}
+
+export async function addDeskItem(userId: string, taskId: string, input: { title: string; parentName?: string; detail?: string; status?: string }) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const task = await q(`select id, task_type, target_count, done_count from public.staff_tasks where id = $1 and staff_id = $2 and status = 'assigned'`, [taskId, staff.id]);
+  const row = task.rows[0];
+  if (!row) return { ok: false as const, error: "Task not found" };
+  const kind = String(row.task_type);
+  if (!["category", "care"].includes(kind)) return { ok: false as const, error: "Ye kaam list me nahi judta" };
+  const title = input.title.trim();
+  if (title.length < 2) return { ok: false as const, error: "Naam likhein" };
+  if (kind === "category") {
+    const dup = await q(
+      `select id from public.staff_desk_items where task_id = $1 and lower(title) = lower($2) limit 1`,
+      [taskId, title],
+    );
+    if (dup.rows[0]) return { ok: false as const, error: `"${title}" pehle se hai — duplicate nahi judi` };
+  }
+  await q(
+    `insert into public.staff_desk_items (task_id, staff_id, kind, title, detail, parent_name, status)
+     values ($1,$2,$3,$4,$5,$6,$7)`,
+    [taskId, staff.id, kind, title, input.detail?.trim() || null, input.parentName?.trim() || null, input.status || (kind === "category" ? "pending" : "done")],
+  );
+  await q(`update public.staff_tasks set done_count = coalesce(done_count, 0) + 1 where id = $1`, [taskId]);
+  return { ok: true as const };
+}
+
+export async function decideReview(userId: string, taskId: string, reviewId: string, hide: boolean) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const task = await q(`select id from public.staff_tasks where id = $1 and staff_id = $2 and task_type = 'review' and status = 'assigned'`, [taskId, staff.id]);
+  if (!task.rows[0]) return { ok: false as const, error: "Task not found" };
+  const review = await q(`select id, comment from public.vendor_reviews where id = $1`, [reviewId]);
+  if (!review.rows[0]) return { ok: false as const, error: "Review not found" };
+  await q(
+    `insert into public.staff_desk_items (task_id, staff_id, kind, title, status, ref_id) values ($1,$2,'review',$3,$4,$5)`,
+    [taskId, staff.id, String(review.rows[0].comment ?? "Review").slice(0, 160), hide ? "hidden" : "approved", reviewId],
+  );
+  if (hide) await q(`update public.vendor_reviews set hidden = true, updated_at = now() where id = $1`, [reviewId]);
+  await q(`update public.staff_tasks set done_count = coalesce(done_count, 0) + 1 where id = $1`, [taskId]);
+  return { ok: true as const };
+}
+
+export async function listPendingDesk() {
+  const { rows } = await q(
+    `select d.id, d.title, d.parent_name, d.kind, d.created_at, p.name as staff_name
+       from public.staff_desk_items d
+       left join public.staff_profiles p on p.id = d.staff_id
+      where d.kind = 'category' and d.status = 'pending'
+      order by d.created_at desc limit 40`,
+  );
+  return rows;
+}
+
+export async function approveDeskItem(id: string) {
+  const { rows } = await q(`update public.staff_desk_items set status = 'approved' where id = $1 and status = 'pending' returning id`, [id]);
+  if (!rows[0]) return { ok: false as const, error: "Item is not pending" };
+  return { ok: true as const };
+}
+
+export async function createStaffTicket(input: { staffId: string; title: string; body?: string; contactPhone?: string }) {
+  const { rows } = await q(
+    `insert into public.staff_tickets (staff_id, title, body, contact_phone) values ($1,$2,$3,$4) returning *`,
+    [input.staffId, input.title.trim(), input.body?.trim() || null, input.contactPhone?.trim() || null],
+  );
+  void pingStaff(input.staffId, "Naya ticket", input.title.trim());
+  return rows[0];
+}
+
+export async function resolveStaffTicket(userId: string, ticketId: string, note?: string) {
+  const staff = await requireActiveStaff(userId);
+  if (!staff) return { ok: false as const, error: "Staff profile is not active" };
+  const { rows } = await q(
+    `update public.staff_tickets
+        set status = 'resolved', result_note = $3, resolved_at = now()
+      where id = $1 and staff_id = $2 and status = 'open'
+      returning id`,
+    [ticketId, staff.id, note?.trim() || null],
+  );
+  if (!rows[0]) return { ok: false as const, error: "Ticket not found" };
+  return { ok: true as const };
 }
 
 export async function assignTask(input: {
@@ -261,11 +612,12 @@ export async function assignTask(input: {
   dueLabel?: string;
   shopName?: string;
   assignedBy?: string | null;
+  targetCount?: number;
 }) {
   const { rows } = await q(
     `insert into public.staff_tasks
-       (staff_id, title, description, task_type, amount_inr, due_label, admin_note, shop_name, status, assigned_by)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,'assigned',$9)
+       (staff_id, title, description, task_type, amount_inr, due_label, admin_note, shop_name, status, assigned_by, target_count)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,'assigned',$9,$10)
      returning *`,
     [
       input.staffId,
@@ -277,8 +629,10 @@ export async function assignTask(input: {
       input.note ?? null,
       input.shopName ?? null,
       input.assignedBy ?? null,
+      input.targetCount ?? 0,
     ],
   );
+  void pingStaff(input.staffId, "Naya kaam", input.title);
   return rows[0];
 }
 

@@ -149,14 +149,49 @@ leadsRouter.get(
                 cat.icon as service_icon,
                 coalesce((
                   select jsonb_agg(jsonb_build_object(
-                    'id', v2.user_id,
-                    'name', coalesce(v2.business_name, v2.owner_name, 'Vendor'),
-                    'avatar', v2.avatar_url,
-                    'rating', v2.rating_avg,
-                    'online', coalesce(v2.is_online, false)
-                  ) order by (v2.user_id = l.customer_approved_vendor_id) desc nulls last, coalesce(v2.business_name, v2.owner_name))
-                  from public.vendors v2
-                  where v2.user_id = any(coalesce(l.accepted_vendor_ids, '{}'::uuid[]))
+                    'id', q.user_id,
+                    'name', q.name,
+                    'avatar', q.avatar,
+                    'rating', q.rating,
+                    'online', q.online,
+                    'status', q.status,
+                    'responded_at', q.responded_at,
+                    'offered_at', q.offered_at,
+                    'unread', q.unread
+                  ) order by q.pick desc, q.accepted desc, q.responded_at desc nulls last)
+                  from (
+                    select v2.user_id,
+                           coalesce(v2.business_name, v2.owner_name, 'Vendor') as name,
+                           v2.avatar_url as avatar,
+                           v2.rating_avg as rating,
+                           coalesce(v2.is_online, false) as online,
+                           case
+                             when n.status in ('accepted', 'placed')
+                               or v2.user_id = any(coalesce(l.accepted_vendor_ids, '{}'::uuid[]))
+                             then 'accepted' else 'pending'
+                           end as status,
+                           n.responded_at,
+                           coalesce(n.created_at, l.created_at) as offered_at,
+                           (select count(*)::int from public.lead_messages m
+                             where m.lead_id = l.id and m.sender_id = v2.user_id
+                               and m.recipient_id = $1 and m.read_at is null
+                               and not coalesce(m.is_deleted, false)) as unread,
+                           (v2.user_id = l.customer_approved_vendor_id) as pick,
+                           (n.status in ('accepted', 'placed')
+                             or v2.user_id = any(coalesce(l.accepted_vendor_ids, '{}'::uuid[]))) as accepted
+                      from public.vendors v2
+                      left join public.lead_notifications n
+                        on n.lead_id = l.id and n.vendor_id = v2.user_id
+                     where (
+                            v2.user_id = any(coalesce(l.accepted_vendor_ids, '{}'::uuid[]))
+                         or (n.lead_id = l.id and coalesce(n.status, 'pending') in ('pending', 'accepted', 'placed'))
+                           )
+                       and coalesce(n.status, 'accepted') <> 'rejected'
+                     order by (v2.user_id = l.customer_approved_vendor_id) desc nulls last,
+                              (n.status in ('accepted', 'placed')) desc,
+                              n.responded_at desc nulls last
+                     limit 6
+                  ) q
                 ), '[]'::jsonb) as offer_vendors
            from public.leads l
            left join public.vendors v
@@ -179,6 +214,114 @@ leadsRouter.get(
       ),
     ]);
     return ok(res, { as_customer: asCustomer.rows, as_vendor: notifs.rows, leads: asCustomer.rows });
+  }),
+);
+
+/** Prototype Badlein picker — products for the lead's chosen vendor. */
+leadsRouter.get(
+  "/:id/products",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) return fail(res, 400, "Invalid lead id");
+    await ensureVendorSchema();
+    const pool = getPool();
+    const lead = (
+      await pool.query(
+        `select id, customer_id, sub_category_name, customer_approved_vendor_id, accepted_vendor_ids
+           from public.leads where id = $1`,
+        [id.data],
+      )
+    ).rows[0] as
+      | {
+          customer_id: string;
+          sub_category_name: string | null;
+          customer_approved_vendor_id: string | null;
+          accepted_vendor_ids: string[] | null;
+        }
+      | undefined;
+    if (!lead) return fail(res, 404, "Lead not found");
+    if (lead.customer_id !== req.userId) return fail(res, 403, "Not your order");
+    const vendorId =
+      lead.customer_approved_vendor_id ??
+      (Array.isArray(lead.accepted_vendor_ids) && lead.accepted_vendor_ids.length === 1
+        ? lead.accepted_vendor_ids[0]
+        : null);
+    if (!vendorId) return ok(res, { products: [], vendor_name: null, current: lead.sub_category_name });
+    const vendor = (
+      await pool.query(
+        `select coalesce(business_name, owner_name) as name from public.vendors where user_id = $1`,
+        [vendorId],
+      )
+    ).rows[0] as { name?: string } | undefined;
+    const { rows } = await pool.query(
+      `select id, name, price, mrp, image_url, description, unit, sort_order
+         from public.shop_products
+        where user_id = $1 and coalesce(is_active, true)
+        order by sort_order nulls last, name
+        limit 40`,
+      [vendorId],
+    );
+    return ok(res, {
+      products: rows,
+      vendor_id: vendorId,
+      vendor_name: vendor?.name ?? null,
+      current: lead.sub_category_name,
+    });
+  }),
+);
+
+/** Switch the tracked product (prototype pkPick on track sheet). */
+leadsRouter.post(
+  "/:id/switch-product",
+  asyncHandler(async (req, res) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) return fail(res, 400, "Invalid lead id");
+    const body = z
+      .object({
+        product_id: z.string().uuid().optional(),
+        name: z.string().min(1).max(160),
+        price: z.number().nonnegative().optional(),
+        icon: z.string().max(16).optional(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return zodFail(res, body.error);
+    await ensureVendorSchema();
+    const pool = getPool();
+    const lead = (
+      await pool.query(`select id, customer_id, customer_approved_vendor_id from public.leads where id = $1`, [id.data])
+    ).rows[0] as { customer_id: string; customer_approved_vendor_id: string | null } | undefined;
+    if (!lead) return fail(res, 404, "Lead not found");
+    if (lead.customer_id !== req.userId) return fail(res, 403, "Not your order");
+    const note = body.data.icon ? `demo-my-orders-v1 · ${body.data.icon}` : undefined;
+    await pool.query(
+      `update public.leads
+          set sub_category_name = $2,
+              note = coalesce($3, note),
+              updated_at = now()
+        where id = $1`,
+      [id.data, body.data.name, note ?? null],
+    );
+    if (body.data.price != null && lead.customer_approved_vendor_id) {
+      await pool.query(
+        `update public.lead_notifications
+            set quoted_price = $3
+          where lead_id = $1 and vendor_id = $2`,
+        [id.data, lead.customer_approved_vendor_id, body.data.price],
+      );
+    }
+    const refreshed = (
+      await pool.query(
+        `select l.*, n.quoted_price::float as amount,
+                coalesce(v.business_name, v.owner_name) as vendor_name
+           from public.leads l
+           left join public.vendors v on v.user_id = l.customer_approved_vendor_id
+           left join public.lead_notifications n
+             on n.lead_id = l.id and n.vendor_id = l.customer_approved_vendor_id
+          where l.id = $1`,
+        [id.data],
+      )
+    ).rows[0];
+    return ok(res, { lead: refreshed });
   }),
 );
 
